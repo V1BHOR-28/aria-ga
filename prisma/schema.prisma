@@ -1,0 +1,60 @@
+// ARIA — Autonomous Reasoning & Intelligent Assistant
+// Prisma schema for partner-style AI with memory & emotional continuity
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  title     String    @default("New thread")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+
+  @@map("conversations")
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  role           String       // 'user' | 'assistant' | 'system'
+  content        String
+  mood           String?      // assistant mood tag, e.g. 'curious', 'warm'
+  toolUsed       String?      // tool name if any was invoked
+  toolPayload    String?      // JSON-stringified tool result summary
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// Long-term autobiographical + user-fact memory
+model Memory {
+  id         String   @id @default(cuid())
+  kind       String   // 'user_fact' | 'preference' | 'event' | 'relationship' | 'project' | 'reflection'
+  content    String
+  importance Int      @default(5) // 1-10
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([kind])
+  @@map("memories")
+}
+
+// Mood timeline — ARIA's emotional state over time
+model MoodLog {
+  id        String   @id @default(cuid())
+  mood      String
+  trigger   String?  // what user message / event caused it
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("mood_logs")
+}
