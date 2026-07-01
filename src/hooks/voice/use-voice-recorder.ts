@@ -97,11 +97,14 @@ export function useVoiceRecorder({
       analyserRef.current = analyser;
       monitorLevel();
 
-      // Pick the best available mime type
+      // Pick the best available mime type. The ASR backend only supports
+      // WAV and WebM, so we strongly prefer webm. mp4/ogg are last-resort
+      // (will likely fail server-side, but at least we get to record).
       const mimeTypes = [
         "audio/webm;codecs=opus",
         "audio/webm",
         "audio/ogg;codecs=opus",
+        "audio/ogg",
         "audio/mp4",
       ];
       const mimeType = mimeTypes.find((t) => MediaRecorder.isTypeSupported(t));
@@ -130,14 +133,17 @@ export function useVoiceRecorder({
 
         setLoading(true);
         try {
-          // Convert to base64
+          // Convert to base64 in chunks to avoid call-stack issues with long
+          // recordings. btoa works on binary strings; we build it in 32KB slices.
           const arrayBuffer = await blob.arrayBuffer();
-          const base64 = btoa(
-            new Uint8Array(arrayBuffer).reduce(
-              (data, byte) => data + String.fromCharCode(byte),
-              ""
-            )
-          );
+          const bytes = new Uint8Array(arrayBuffer);
+          let binary = "";
+          const CHUNK = 0x8000; // 32KB
+          for (let i = 0; i < bytes.length; i += CHUNK) {
+            const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
+            binary += String.fromCharCode.apply(null, Array.from(slice));
+          }
+          const base64 = btoa(binary);
 
           const res = await fetch("/api/asr", {
             method: "POST",
@@ -158,9 +164,21 @@ export function useVoiceRecorder({
           }
         } catch (err) {
           console.error("[useVoiceRecorder]", err);
-          const msg = err instanceof Error ? err.message : "Transcription failed";
-          setError(msg);
-          onError?.(err instanceof Error ? err : new Error(msg));
+          const raw = err instanceof Error ? err.message : "Transcription failed";
+          // Translate upstream errors into something actionable for the user.
+          let friendly = raw;
+          if (/unsupported audio format/i.test(raw)) {
+            friendly =
+              "This browser's audio format isn't supported by the speech service. Try Chrome or Firefox.";
+          } else if (/Too many requests|429/i.test(raw)) {
+            friendly =
+              "Speech service is rate-limited right now — wait a few seconds and try again.";
+          } else if (/decode|base64/i.test(raw)) {
+            friendly =
+              "Something went wrong encoding the audio. Try recording again.";
+          }
+          setError(friendly);
+          onError?.(err instanceof Error ? err : new Error(raw));
         } finally {
           setLoading(false);
         }

@@ -21,8 +21,27 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Strip data URI prefix if present
-    const base64 = audio.replace(/^data:[^;]+;base64,/, "");
+    // Strip data URI prefix if present.
+    // Use indexOf instead of a strict regex because mime types can contain
+    // extra semicolons (e.g. "audio/webm;codecs=opus") that break naive matching.
+    let base64 = audio;
+    const marker = ";base64,";
+    const markerIdx = audio.indexOf(marker);
+    if (markerIdx >= 0) {
+      base64 = audio.slice(markerIdx + marker.length);
+    }
+
+    // Sanity check: base64 should only contain A-Z, a-z, 0-9, +, /, =, and whitespace
+    if (!/^[A-Za-z0-9+/=\s]+$/.test(base64)) {
+      console.error(
+        "[/api/asr] not valid base64 — first 80 chars:",
+        base64.slice(0, 80)
+      );
+      return NextResponse.json(
+        { error: "Audio data is not valid base64" },
+        { status: 400 }
+      );
+    }
 
     const zai = await ZAI.create();
     const response = await zai.audio.asr.create({
