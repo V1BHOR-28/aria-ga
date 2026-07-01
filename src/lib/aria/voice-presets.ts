@@ -42,13 +42,15 @@ export const VOICE_PRESETS: Record<VoicePreset, PresetConfig> = {
     tempo: 0.95,
     // Subtle room reverb for intimate, in-your-ear presence
     reverb: 18,
-    // Smooth highs — Friday never sounds shrill
-    treble: -1.5,
-    // Warm low-end
-    bass: 2.0,
-    gain: 1.5,
+    // Slightly brighter highs — crisper consonants for British clarity
+    // (was -1.5, now +0.5 to lift the "t" and "k" sounds)
+    treble: 0.5,
+    // Warm low-end for chest resonance (British alto character)
+    bass: 2.5,
+    // Louder — bumped from +1.5 to +8 for clear audibility
+    gain: 8,
     label: "Friday",
-    description: "Calm alto, subtle reverb, intimate presence. Closest to Iron Man's assistant.",
+    description: "Calm British alto, subtle reverb, intimate presence. Closest to Iron Man's assistant.",
   },
   warm: {
     pitch: -1.5,
