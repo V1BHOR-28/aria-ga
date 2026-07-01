@@ -393,6 +393,7 @@ const DEFAULT_SETTINGS: VoiceSettings = {
   provider: "zai", // Friday preset — the user's preferred voice
   voiceId: "",
   speed: 1.0,
+  recognitionLang: "en-IN",
   apiKeys: {},
 };
 

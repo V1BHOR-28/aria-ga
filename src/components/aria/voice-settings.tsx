@@ -209,6 +209,35 @@ export function VoiceSettings({ speech }: VoiceSettingsProps) {
               </div>
             )}
 
+            {/* Voice input language (for speech recognition) */}
+            <div className="mb-4 pt-3 border-t border-white/5">
+              <label className="text-[10px] uppercase tracking-wider text-[#8a7d72] mb-1.5 block">
+                Voice input language
+              </label>
+              <p className="text-[10px] text-[#8a7d72] mb-2 leading-snug">
+                What language do you speak to ARIA? (Browser voice recognition only — Chrome/Edge)
+              </p>
+              <div className="flex gap-1.5">
+                {([
+                  { id: "en-IN", label: "English (India)" },
+                  { id: "hi-IN", label: "हिंदी" },
+                  { id: "en-US", label: "English (US)" },
+                ] as const).map((l) => (
+                  <button
+                    key={l.id}
+                    onClick={() => update({ recognitionLang: l.id })}
+                    className={`flex-1 px-2 py-1.5 rounded-md text-[10px] transition-colors border ${
+                      settings.recognitionLang === l.id
+                        ? "bg-[#3a2e28] border-[#7fd1c4]/40 text-[#7fd1c4]"
+                        : "bg-white/[0.02] border-white/5 text-[#8a7d72] hover:bg-white/5"
+                    }`}
+                  >
+                    {l.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Speed slider */}
             <div className="mb-4 pt-3 border-t border-white/5">
               <div className="flex items-center justify-between mb-1.5">

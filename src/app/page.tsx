@@ -510,6 +510,8 @@ export default function Home() {
             speech={speech}
             currentMood={currentMood}
             onMoodChange={setCurrentMood}
+            settings={speech.settings}
+            onSettingsChange={speech.updateSettings}
           />
         </div>
       </div>
