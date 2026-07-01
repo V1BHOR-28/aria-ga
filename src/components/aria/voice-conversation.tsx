@@ -107,8 +107,16 @@ export function VoiceConversation({
     [conversationId, speech, onMoodChange]
   );
 
-  // Web Speech recognition (browser-native, supports Hindi) — preferred
-  const webSpeechSupported = isWebSpeechRecognitionSupported();
+  // Mounted guard — prevents SSR/client hydration mismatch for browser-only
+  // APIs like Web Speech recognition.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Web Speech recognition (browser-native, supports Hindi) — preferred.
+  // Only check support after mount to avoid hydration mismatch.
+  const webSpeechSupported = mounted && isWebSpeechRecognitionSupported();
   const webRecognition = useWebSpeechRecognition({
     lang: recognitionLang,
     onFinalResult: (text) => {
