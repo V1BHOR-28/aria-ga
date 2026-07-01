@@ -71,16 +71,18 @@ export async function processVoice(
 function buildFilterChain(cfg: typeof VOICE_PRESETS["friday"]): string {
   const filters: string[] = [];
 
-  // Pitch shift + tempo via rubberband (formant-preserving)
+  // 1. Pitch shift + tempo via rubberband (formant-preserving)
+  //    transients=crisp preserves transient sounds at punctuation boundaries
+  //    instead of smearing across them (fixes "stuck on punctuations").
   if (cfg.pitch !== 0 || cfg.tempo !== 1.0) {
     const pitchMult = Math.pow(2, cfg.pitch / 12);
     const tempoMult = cfg.tempo;
     filters.push(
-      `rubberband=tempo=${tempoMult.toFixed(4)}:pitch=${pitchMult.toFixed(4)}:formant=preserved:transients=smooth:phase=laminar:channels=together:pitchq=quality`
+      `rubberband=tempo=${tempoMult.toFixed(4)}:pitch=${pitchMult.toFixed(4)}:formant=preserved:transients=crisp:phase=laminar:channels=together:pitchq=quality`
     );
   }
 
-  // EQ: bass + treble
+  // 2. EQ: bass + treble
   if (cfg.bass !== 0) {
     filters.push(`bass=f=200:gain=${cfg.bass}`);
   }
@@ -88,7 +90,7 @@ function buildFilterChain(cfg: typeof VOICE_PRESETS["friday"]): string {
     filters.push(`treble=f=4000:gain=${cfg.treble}`);
   }
 
-  // Reverb — aecho with short delays and decays for a small room feel
+  // 3. Reverb — aecho with short delays and decays for a small room feel
   if (cfg.reverb > 0) {
     const mix = cfg.reverb / 100;
     const inGain = 1 - mix * 0.3;
@@ -98,15 +100,43 @@ function buildFilterChain(cfg: typeof VOICE_PRESETS["friday"]): string {
     );
   }
 
-  // Gain
+  // 4. Trim excessive pauses at punctuation.
+  //    The TTS engine generates natural pauses at commas/periods, and the
+  //    rubberband tempo stretch lengthens them. silenceremove detects
+  //    silence below -40dB and caps each pause at 120ms — so punctuation
+  //    still gets a natural micro-pause but not a long gap.
+  //    window_samples=82 (~3ms at 24kHz) for precise detection.
+  filters.push(
+    "silenceremove=window=0.03:stop_periods=-1:stop_silence=0.12:stop_threshold=-40dB:detection=peak"
+  );
+
+  // 5. Gain
   if (cfg.gain !== 0) {
     filters.push(`volume=${cfg.gain > 0 ? "+" : ""}${cfg.gain}dB`);
   }
 
-  // Dynamic audio normalization — boosts quiet passages so the voice
-  // stays consistently audible. Single-pass, works well for TTS.
-  // f=150 means it adapts over 150ms windows, p=0.9 is the target peak.
-  filters.push("dynaudnorm=f=150:p=0.9");
+  // 6. Compressor — reduces dynamic range so quiet and loud passages
+  //    are closer in volume. This is the key to consistent loudness.
+  //
+  //    compand params:
+  //    - attacks=0:decays=100ms (fast attack, smooth release)
+  //    - points: -80/-80|-60/-30|-40/-20|-20/-12|0/-3
+  //      Below -60dB: leave alone (silence / background noise)
+  //      -60→-30: huge boost (very quiet speech → audible)
+  //      -40→-20: boost (quiet speech → normal)
+  //      -20→-12: slight boost (normal speech → louder)
+  //      0→-3: slight attenuation (loud peaks → controlled)
+  filters.push(
+    "compand=attacks=0:decays=0.1:points=-80/-80|-60/-30|-40/-20|-20/-12|0/-3:soft-knee=6"
+  );
+
+  // 7. Loudness normalization (single-pass mode).
+  //    loudnorm measures the integrated loudness and adjusts to a target.
+  //    I=-16 LUFS is broadcast standard for speech. TP=-1.5 is true-peak
+  //    ceiling. LRA=11 is the loudness range target.
+  //    Single-pass mode (no second measurement file needed) is less
+  //    precise than two-pass but works fine for TTS and is fast.
+  filters.push("loudnorm=I=-16:TP=-1.5:LRA=11:print_format=none");
 
   return filters.join(",");
 }
