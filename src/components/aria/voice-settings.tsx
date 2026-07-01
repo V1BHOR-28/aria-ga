@@ -168,23 +168,13 @@ export function VoiceSettings({ speech }: VoiceSettingsProps) {
               </div>
             )}
 
-            {/* API key — ElevenLabs */}
+            {/* API key — ElevenLabs (stored encrypted server-side) */}
             {settings.provider === "elevenlabs" && (
               <div className="mb-4 pt-3 border-t border-white/5">
                 <label className="text-[10px] uppercase tracking-wider text-[#8a7d72] mb-1.5 block">
                   ElevenLabs API Key
                 </label>
-                <input
-                  type="password"
-                  value={settings.apiKeys.elevenlabs || ""}
-                  onChange={(e) =>
-                    update({
-                      apiKeys: { ...settings.apiKeys, elevenlabs: e.target.value },
-                    })
-                  }
-                  placeholder="sk-..."
-                  className="w-full bg-[#1a1614] border border-white/10 rounded-md px-2 py-1.5 text-xs text-[#e8e2db] focus:outline-none focus:ring-1 focus:ring-[#7fd1c4]"
-                />
+                <ElevenLabsKeyInput />
                 <a
                   href="https://elevenlabs.io/app/settings/api-keys"
                   target="_blank"
@@ -193,6 +183,9 @@ export function VoiceSettings({ speech }: VoiceSettingsProps) {
                 >
                   Get an API key <ExternalLink className="w-2.5 h-2.5" />
                 </a>
+                <p className="text-[10px] text-[#8a7d72] mt-1.5">
+                  Stored encrypted on the server. Never sent to the browser after saving.
+                </p>
                 <label className="text-[10px] uppercase tracking-wider text-[#8a7d72] mb-1.5 mt-3 block">
                   Voice ID (optional)
                 </label>
@@ -295,6 +288,108 @@ export function VoiceSettings({ speech }: VoiceSettingsProps) {
             </div>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * ElevenLabs API key input — stores the key encrypted on the server.
+ * The plaintext key is never stored in localStorage and never returned
+ * to the browser after saving.
+ */
+function ElevenLabsKeyInput() {
+  const [keyInput, setKeyInput] = useState("");
+  const [configured, setConfigured] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Check if a key is already configured on the server
+  useEffect(() => {
+    void fetch("/api/settings/keys")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.providers?.includes("elevenlabs")) {
+          setConfigured(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const save = async () => {
+    if (!keyInput.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/settings/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "elevenlabs", key: keyInput.trim() }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to save key");
+      }
+      setConfigured(true);
+      setKeyInput(""); // Clear the input — key is on the server now
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async () => {
+    setSaving(true);
+    try {
+      await fetch("/api/settings/keys?provider=elevenlabs", {
+        method: "DELETE",
+      });
+      setConfigured(false);
+    } catch {
+      // ignore
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (configured) {
+    return (
+      <div className="flex items-center gap-2">
+        <div className="flex-1 px-3 py-1.5 rounded-md bg-[#7fd1c4]/10 border border-[#7fd1c4]/20 text-xs text-[#7fd1c4]">
+          ✓ Key configured (stored encrypted on server)
+        </div>
+        <button
+          onClick={() => void remove()}
+          disabled={saving}
+          className="px-2 py-1.5 rounded-md text-[10px] uppercase tracking-wider text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
+        >
+          Remove
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex gap-1.5">
+        <input
+          type="password"
+          value={keyInput}
+          onChange={(e) => setKeyInput(e.target.value)}
+          placeholder="sk-..."
+          className="flex-1 bg-[#1a1614] border border-white/10 rounded-md px-2 py-1.5 text-xs text-[#e8e2db] focus:outline-none focus:ring-1 focus:ring-[#7fd1c4]"
+        />
+        <button
+          onClick={() => void save()}
+          disabled={saving || !keyInput.trim()}
+          className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-wider bg-[#7fd1c4] text-[#1a1614] hover:bg-[#a5e5db] transition-colors disabled:opacity-50"
+        >
+          {saving ? "…" : "Save"}
+        </button>
+      </div>
+      {error && (
+        <p className="text-[10px] text-red-400 mt-1">{error}</p>
       )}
     </div>
   );

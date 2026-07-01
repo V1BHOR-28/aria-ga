@@ -56,14 +56,15 @@ export const TTS_PROVIDERS: Record<TtsProviderId, TtsProviderConfig> = {
 };
 
 // Persisted voice settings — stored in localStorage
+// NOTE: API keys are NOT stored here. They're stored encrypted server-side
+// via /api/settings/keys. The client only knows which providers have keys
+// configured (fetched from the server), never the key values themselves.
 export interface VoiceSettings {
   provider: TtsProviderId;
   voiceId: string; // provider-specific voice id
   speed: number; // 0.5 - 1.5
   // Recognition language for voice input
   recognitionLang: "en-IN" | "hi-IN" | "en-US";
-  // For ElevenLabs etc.
-  apiKeys: Partial<Record<TtsProviderId, string>>;
 }
 
 const STORAGE_KEY = "aria-voice-settings";
@@ -73,7 +74,6 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   voiceId: "", // empty = Friday preset's default
   speed: 1.0,
   recognitionLang: "en-IN", // auto-detect English/Hindi (Indian context)
-  apiKeys: {},
 };
 
 export function loadVoiceSettings(): VoiceSettings {

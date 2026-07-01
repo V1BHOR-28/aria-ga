@@ -36,15 +36,19 @@ model Message {
 }
 
 // Long-term autobiographical + user-fact memory
+// status: "pending" (default, not yet reviewed) → "approved" | "rejected"
+// Only "approved" memories are included in LLM recall.
 model Memory {
   id         String   @id @default(cuid())
   kind       String   // 'user_fact' | 'preference' | 'event' | 'relationship' | 'project' | 'reflection'
   content    String
   importance Int      @default(5) // 1-10
+  status     String   @default("pending") // 'pending' | 'approved' | 'rejected'
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   @@index([kind])
+  @@index([status])
   @@map("memories")
 }
 
@@ -57,4 +61,17 @@ model MoodLog {
 
   @@index([createdAt])
   @@map("mood_logs")
+}
+
+// Encrypted provider API keys (ElevenLabs, etc.)
+// Stored server-side only — never sent to the browser after initial entry.
+// The encryptedKey column holds AES-GCM ciphertext (base64).
+model ProviderKey {
+  id           String   @id @default(cuid())
+  provider     String   @unique // 'elevenlabs' | etc.
+  encryptedKey String   // AES-GCM ciphertext, base64
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("provider_keys")
 }

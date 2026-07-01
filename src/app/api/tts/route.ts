@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import ZAI from "z-ai-web-dev-sdk";
 import { preprocessForTTS } from "@/lib/aria/tts-preprocess";
 import { processVoice } from "@/lib/aria/voice-process";
+import { createTTS } from "@/lib/aria/zai-client";
+import { getProviderKey } from "@/lib/aria/api-keys";
 import type { VoicePreset } from "@/lib/aria/voice-presets";
 
 export const runtime = "nodejs";
@@ -11,13 +12,15 @@ interface TtsRequestBody {
   speed?: number;
   provider?: "zai" | "elevenlabs";
   voiceId?: string;
-  apiKey?: string;
   preset?: VoicePreset;
   raw?: boolean;
 }
 
 // POST /api/tts — server-side TTS for providers that need it (zai, elevenlabs).
 // Web Speech API runs client-side and never hits this route.
+//
+// API keys are NEVER sent from the client. For ElevenLabs, the key is looked
+// up from the encrypted server-side store (see api-keys.ts).
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as TtsRequestBody;
@@ -26,7 +29,6 @@ export async function POST(req: NextRequest) {
       speed,
       provider = "zai",
       voiceId,
-      apiKey,
       preset,
       raw,
     } = body;
@@ -48,9 +50,11 @@ export async function POST(req: NextRequest) {
     let contentType = "audio/wav";
 
     if (provider === "elevenlabs") {
+      // Key is stored server-side, never sent from the client
+      const apiKey = await getProviderKey("elevenlabs");
       if (!apiKey) {
         return NextResponse.json(
-          { error: "ElevenLabs API key required. Add it in voice settings." },
+          { error: "ElevenLabs API key not configured. Add it in voice settings." },
           { status: 401 }
         );
       }
@@ -63,7 +67,7 @@ export async function POST(req: NextRequest) {
       audioBuffer = result.buffer;
       contentType = result.contentType;
     } else {
-      // Z.ai (default)
+      // Z.ai (default) — uses the official API key from env var
       const safeSpeed =
         typeof speed === "number" && speed >= 0.5 && speed <= 2.0 ? speed : 0.9;
       const safePreset: VoicePreset =
@@ -71,12 +75,10 @@ export async function POST(req: NextRequest) {
           ? preset
           : "friday";
 
-      const zai = await ZAI.create();
-      const response = await zai.audio.tts.create({
+      const response = await createTTS({
         input: truncated,
         voice: "tongtong",
         response_format: "wav",
-        stream: false,
         speed: safeSpeed,
       });
 
@@ -113,7 +115,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ElevenLabs TTS — requires API key from the user.
+// ElevenLabs TTS — requires API key from the encrypted server-side store.
 // Docs: https://elevenlabs.io/docs/api-reference/text-to-speech
 async function synthesizeElevenLabs(
   text: string,

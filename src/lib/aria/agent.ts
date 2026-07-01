@@ -1,11 +1,14 @@
 // ARIA — Agent core
-// Handles: memory recall, web search decisions, LLM call, mood parsing,
-// memory extraction, persistence. One function: runTurn().
+// Handles: memory recall, LLM call, mood parsing, memory extraction,
+// persistence. One function: runTurn().
 
-import ZAI from "z-ai-web-dev-sdk";
 import { db } from "@/lib/db";
 import { ARIA_SYSTEM_PROMPT } from "./persona";
 import { createAriaStreamParser } from "./stream-parser";
+import {
+  createChatCompletion,
+  createChatCompletionStream,
+} from "./zai-client";
 import type { AgentTurnResult, MemoryKind } from "./types";
 
 // --- Mood tag parsing ----------------------------------------------------
@@ -64,26 +67,30 @@ async function recallRelevantMemories(userMessage: string): Promise<string> {
     .filter((w) => w.length > 3 && !stop.has(w))
     .slice(0, 6);
 
+  // Only approved memories are included in recall. Pending memories
+  // (not yet reviewed by the user) are never sent to the LLM.
   if (words.length === 0) {
-    // Fall back to most important recent memories
+    // Fall back to most important recent approved memories
     const recent = await db.memory.findMany({
+      where: { status: "approved" },
       orderBy: [{ importance: "desc" }, { updatedAt: "desc" }],
       take: 5,
     });
     return formatMemories(recent);
   }
 
-  // OR query across content for any keyword
+  // OR query across content for any keyword, approved only
   const orClauses = words.map((w) => ({ content: { contains: w } }));
   const matches = await db.memory.findMany({
-    where: { OR: orClauses },
+    where: { status: "approved", OR: orClauses },
     orderBy: [{ importance: "desc" }, { updatedAt: "desc" }],
     take: 8,
   });
 
-  // Always include top 3 most important memories as background
+  // Always include top 3 most important approved memories as background
   if (matches.length < 5) {
     const topPicks = await db.memory.findMany({
+      where: { status: "approved" },
       orderBy: [{ importance: "desc" }, { updatedAt: "desc" }],
       take: 5,
     });
@@ -107,50 +114,13 @@ function formatMemories(
   return `# What you remember about the human (use if relevant, don't dump)\n${lines.join("\n")}`;
 }
 
-// --- Web search decision -------------------------------------------------
-
-// Conservative: only search when the user is clearly asking about something
-// current or factual that the model wouldn't reliably know. Common life
-// phrases like "this year" or "today" in casual chat should NOT trigger.
-const SEARCH_TRIGGER =
-  /\b(latest|recently|right now|current (news|events|price|weather|score)|news (today|this week)|stock price|weather (in|today|forecast)|election results|who won|what time is it in)\b/i;
-
-export function shouldSearch(userMessage: string): boolean {
-  return SEARCH_TRIGGER.test(userMessage);
-}
-
-async function runWebSearch(query: string): Promise<{
-  results: { title: string; snippet: string; url: string }[];
-  summary: string;
-}> {
-  try {
-    const zai = await ZAI.create();
-    const results = await zai.functions.invoke("web_search", {
-      query,
-      num: 5,
-      recency_days: 30,
-    });
-    if (!Array.isArray(results) || results.length === 0) {
-      return { results: [], summary: "" };
-    }
-    const mapped = results.map((r: { name?: string; title?: string; snippet?: string; url?: string }) => ({
-      title: r.name || r.title || "",
-      snippet: r.snippet || "",
-      url: r.url || "",
-    }));
-    const summary = mapped
-      .map((r: { title: string; snippet: string; url: string }, i: number) => `${i + 1}. ${r.title}\n   ${r.snippet}\n   ${r.url}`)
-      .join("\n\n");
-    return { results: mapped, summary };
-  } catch (err) {
-    console.error("[ARIA] web_search failed:", err);
-    return { results: [], summary: "" };
-  }
-}
-
 // --- Shared turn setup -----------------------------------------------------
-// Steps 1-4 are identical whether we're going to call the LLM in streaming
+// Steps 1-3 are identical whether we're going to call the LLM in streaming
 // or non-streaming mode, so both runTurn() and runTurnStream() share them.
+//
+// Web search is now handled by the model's built-in web_search tool
+// (passed via tools parameter in the chat completion request). The model
+// decides when to search based on the question — no more regex pre-filter.
 
 interface PreparedTurn {
   messages: { role: "user" | "assistant" | "system"; content: string }[];
@@ -170,22 +140,7 @@ async function prepareTurn(
 
   const memoryBlock = await recallRelevantMemories(userMessage);
 
-  let toolUsed: string | undefined;
-  let toolPayload: string | undefined;
-  let searchContext = "";
-
-  if (shouldSearch(userMessage)) {
-    const search = await runWebSearch(userMessage);
-    if (search.summary) {
-      toolUsed = "web_search";
-      toolPayload = JSON.stringify(
-        search.results.slice(0, 3).map((r) => ({ title: r.title, url: r.url }))
-      );
-      searchContext = `# Fresh web context (just searched, may use)\n${search.summary}`;
-    }
-  }
-
-  const systemContent = [ARIA_SYSTEM_PROMPT, memoryBlock, searchContext]
+  const systemContent = [ARIA_SYSTEM_PROMPT, memoryBlock]
     .filter(Boolean)
     .join("\n\n---\n\n");
 
@@ -201,7 +156,7 @@ async function prepareTurn(
     { role: "user" as const, content: userMessage },
   ];
 
-  return { messages, toolUsed, toolPayload };
+  return { messages };
 }
 
 // Persist memories, mood log, and (if it's the first turn) the conversation
@@ -220,11 +175,14 @@ async function finalizeTurn(args: {
         where: { content: { contains: mem.content.slice(0, 40) } },
       });
       if (!existing) {
+        // New memories land as "pending" — the user must approve them
+        // before they're included in recall. No silent auto-approval.
         await db.memory.create({
           data: {
             kind: mem.kind,
             content: mem.content,
             importance: mem.importance,
+            status: "pending",
           },
         });
       }
@@ -259,20 +217,13 @@ export async function runTurn({
   conversationId,
   userMessage,
 }: RunTurnArgs): Promise<AgentTurnResult> {
-  const { messages, toolUsed, toolPayload } = await prepareTurn(
-    conversationId,
-    userMessage
-  );
+  const { messages } = await prepareTurn(conversationId, userMessage);
 
-  const zai = await ZAI.create();
-  const completion = await zai.chat.completions.create({
+  const { content: rawContent, webSearched } = await createChatCompletion({
     messages,
-    thinking: { type: "disabled" },
     temperature: 0.85,
+    enableWebSearch: true,
   });
-
-  const rawContent: string =
-    completion?.choices?.[0]?.message?.content ?? "";
 
   const { mood, content: moodStripped } = parseMoodTag(rawContent);
   const { cleaned, memories } = parseMemoryTags(moodStripped);
@@ -283,8 +234,8 @@ export async function runTurn({
     content: cleaned,
     rawContent,
     mood,
-    toolUsed,
-    toolPayload,
+    toolUsed: webSearched ? "web_search" : undefined,
+    toolPayload: undefined,
     newMemories: memories,
   };
 }
@@ -304,89 +255,66 @@ export async function runTurnStream(
   { conversationId, userMessage }: RunTurnArgs,
   callbacks: RunTurnStreamCallbacks = {}
 ): Promise<AgentTurnResult> {
-  const { messages, toolUsed, toolPayload } = await prepareTurn(
-    conversationId,
-    userMessage
-  );
+  const { messages } = await prepareTurn(conversationId, userMessage);
 
-  const zai = await ZAI.create();
-  const response = await zai.chat.completions.create({
+  const { stream: body, webSearched } = await createChatCompletionStream({
     messages,
-    thinking: { type: "disabled" },
     temperature: 0.85,
     stream: true,
+    enableWebSearch: true,
   });
 
   const parser = createAriaStreamParser();
   let rawContent = "";
   let moodAnnounced = false;
 
-  // z-ai-web-dev-sdk returns a raw ReadableStream<Uint8Array> of SSE lines
-  // (OpenAI-compatible: `data: {"choices":[{"delta":{"content":"..."}}]}`)
-  // when stream: true and the response content-type is event-stream/plain.
-  const body: ReadableStream<Uint8Array> | undefined =
-    response && typeof (response as any).getReader === "function"
-      ? (response as unknown as ReadableStream<Uint8Array>)
-      : (response as any)?.body;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = "";
 
-  if (!body) {
-    // Fallback: provider didn't actually stream (e.g. local dev stub).
-    // Treat the whole thing as one final delta so callers still work.
-    const full = (response as any)?.choices?.[0]?.message?.content ?? "";
-    rawContent = full;
-    const visible = parser.push(full) + parser.flush();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    sseBuffer += decoder.decode(value, { stream: true });
+
+    const lines = sseBuffer.split("\n");
+    sseBuffer = lines.pop() ?? ""; // keep the last (possibly partial) line
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const jsonStr = trimmed.slice(5).trim();
+      if (!jsonStr || jsonStr === "[DONE]") continue;
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(jsonStr);
+      } catch {
+        continue; // skip a malformed SSE chunk rather than kill the turn
+      }
+
+      const delta: string | undefined =
+        parsed?.choices?.[0]?.delta?.content ??
+        parsed?.choices?.[0]?.message?.content;
+      if (!delta) continue;
+
+      rawContent += delta;
+      const visible = parser.push(delta);
+
+      if (!moodAnnounced && parser.getMood()) {
+        callbacks.onMood?.(parser.getMood());
+        moodAnnounced = true;
+      }
+      if (visible) callbacks.onDelta?.(visible);
+    }
+  }
+
+  const finalVisible = parser.flush();
+  if (!moodAnnounced) {
     callbacks.onMood?.(parser.getMood());
     moodAnnounced = true;
-    if (visible) callbacks.onDelta?.(visible);
-  } else {
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    let sseBuffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      sseBuffer += decoder.decode(value, { stream: true });
-
-      const lines = sseBuffer.split("\n");
-      sseBuffer = lines.pop() ?? ""; // keep the last (possibly partial) line
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const jsonStr = trimmed.slice(5).trim();
-        if (!jsonStr || jsonStr === "[DONE]") continue;
-
-        let parsed: any;
-        try {
-          parsed = JSON.parse(jsonStr);
-        } catch {
-          continue; // skip a malformed SSE chunk rather than kill the turn
-        }
-
-        const delta: string | undefined =
-          parsed?.choices?.[0]?.delta?.content ??
-          parsed?.choices?.[0]?.message?.content;
-        if (!delta) continue;
-
-        rawContent += delta;
-        const visible = parser.push(delta);
-
-        if (!moodAnnounced && parser.getMood()) {
-          callbacks.onMood?.(parser.getMood());
-          moodAnnounced = true;
-        }
-        if (visible) callbacks.onDelta?.(visible);
-      }
-    }
-
-    const finalVisible = parser.flush();
-    if (!moodAnnounced) {
-      callbacks.onMood?.(parser.getMood());
-      moodAnnounced = true;
-    }
-    if (finalVisible) callbacks.onDelta?.(finalVisible);
   }
+  if (finalVisible) callbacks.onDelta?.(finalVisible);
 
   const mood = parser.getMood();
   const memories = parser.getMemories();
@@ -403,8 +331,8 @@ export async function runTurnStream(
     content: cleaned,
     rawContent,
     mood,
-    toolUsed,
-    toolPayload,
+    toolUsed: webSearched ? "web_search" : undefined,
+    toolPayload: undefined,
     newMemories: memories,
   };
 }

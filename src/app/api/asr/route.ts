@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import ZAI from "z-ai-web-dev-sdk";
+import { createASR } from "@/lib/aria/zai-client";
 
 export const runtime = "nodejs";
 
@@ -22,8 +22,6 @@ export async function POST(req: NextRequest) {
     }
 
     // Strip data URI prefix if present.
-    // Use indexOf instead of a strict regex because mime types can contain
-    // extra semicolons (e.g. "audio/webm;codecs=opus") that break naive matching.
     let base64 = audio;
     const marker = ";base64,";
     const markerIdx = audio.indexOf(marker);
@@ -43,16 +41,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const zai = await ZAI.create();
-    const response = await zai.audio.asr.create({
-      file_base64: base64,
-    });
+    const response = await createASR({ file_base64: base64 });
 
-    const text: string =
-      (response as { text?: string })?.text ??
-      (response as { choices?: { text?: string }[] })?.choices?.[0]?.text ??
-      "";
-
+    const text: string = response.text ?? "";
     void format; // reserved for future format-specific handling
 
     if (!text) {

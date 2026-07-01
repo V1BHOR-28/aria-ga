@@ -164,6 +164,8 @@ export function useSpeech(): UseSpeechReturn {
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         if (signal.aborted) return null;
         try {
+          // API keys are NOT sent from the client. The server looks up
+          // the encrypted key from the database for the selected provider.
           const res = await fetch("/api/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -172,7 +174,6 @@ export function useSpeech(): UseSpeechReturn {
               speed: s.speed,
               provider: s.provider,
               voiceId: s.voiceId,
-              apiKey: s.apiKeys[s.provider],
             }),
             signal,
           });
@@ -507,7 +508,6 @@ const DEFAULT_SETTINGS: VoiceSettings = {
   voiceId: "",
   speed: 1.0,
   recognitionLang: "en-IN",
-  apiKeys: {},
 };
 
 // Re-export for components

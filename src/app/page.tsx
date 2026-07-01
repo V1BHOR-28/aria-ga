@@ -13,6 +13,7 @@ import {
   Menu,
   Clock,
   VolumeX,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -51,6 +52,7 @@ interface Memory {
   kind: string;
   content: string;
   importance: number;
+  status: string; // 'pending' | 'approved' | 'rejected'
   createdAt: string;
   updatedAt: string;
 }
@@ -201,6 +203,22 @@ export default function Home() {
     }
   };
 
+  const updateMemoryStatus = async (id: string, status: "approved" | "rejected") => {
+    try {
+      const res = await fetch(`/api/memory?id=${id}&status=${status}`, {
+        method: "PATCH",
+      });
+      const data = await res.json();
+      if (data.memory) {
+        setMemories((prev) =>
+          prev.map((m) => (m.id === id ? { ...m, status } : m))
+        );
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const filteredMemories = memories.filter((m) => {
     if (!memorySearch.trim()) return true;
     return (
@@ -330,6 +348,7 @@ export default function Home() {
                   onClick={() => setActivePanel("memory")}
                   icon={<Brain className="w-3.5 h-3.5" />}
                   label="Memory"
+                  badge={memories.filter((m) => m.status === "pending").length}
                 />
                 <TabButton
                   active={activePanel === "moods"}
@@ -392,6 +411,62 @@ export default function Home() {
 
                 {activePanel === "memory" && (
                   <div className="py-2">
+                    {/* Pending review section — only shows if there are pending memories */}
+                    {memories.filter((m) => m.status === "pending").length > 0 && (
+                      <div className="px-2 pb-3 mb-2 border-b border-white/5">
+                        <div className="flex items-center gap-1.5 px-1 pb-2">
+                          <span className="text-[10px] uppercase tracking-wider text-amber-400/80 font-medium">
+                            Needs review
+                          </span>
+                          <Badge className="text-[9px] py-0 px-1.5 bg-amber-400/20 text-amber-400 border-amber-400/30">
+                            {memories.filter((m) => m.status === "pending").length}
+                          </Badge>
+                        </div>
+                        <div className="space-y-1.5">
+                          {filteredMemories
+                            .filter((m) => m.status === "pending")
+                            .map((m) => (
+                              <div
+                                key={m.id}
+                                className="group px-3 py-2 rounded-md bg-amber-400/[0.03] border border-amber-400/15"
+                              >
+                                <div className="flex items-center justify-between gap-2 mb-1">
+                                  <Badge
+                                    variant="outline"
+                                    className="text-[9px] py-0 px-1.5 border-amber-400/30 text-amber-400/80"
+                                  >
+                                    {MEMORY_KIND_LABELS[m.kind] ?? m.kind}
+                                  </Badge>
+                                  <span className="text-[9px] text-[#8a7d72]">
+                                    imp {m.importance}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-[#d4cabd] leading-snug mb-2">
+                                  {m.content}
+                                </p>
+                                <div className="flex gap-1.5">
+                                  <button
+                                    onClick={() => updateMemoryStatus(m.id, "approved")}
+                                    className="flex-1 flex items-center justify-center gap-1 py-1 rounded text-[10px] uppercase tracking-wider bg-[#7fd1c4]/10 text-[#7fd1c4] hover:bg-[#7fd1c4]/20 transition-colors"
+                                  >
+                                    <Check className="w-3 h-3" />
+                                    Approve
+                                  </button>
+                                  <button
+                                    onClick={() => updateMemoryStatus(m.id, "rejected")}
+                                    className="flex-1 flex items-center justify-center gap-1 py-1 rounded text-[10px] uppercase tracking-wider bg-red-400/10 text-red-400 hover:bg-red-400/20 transition-colors"
+                                  >
+                                    <X className="w-3 h-3" />
+                                    Reject
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Search + approved memories */}
                     <div className="px-2 pb-2 relative">
                       <Search className="w-3 h-3 absolute left-4 top-1/2 -translate-y-1/2 text-[#8a7d72]" />
                       <input
@@ -401,7 +476,7 @@ export default function Home() {
                         className="w-full pl-7 pr-2 py-1.5 text-xs bg-white/5 rounded-md border border-white/5 placeholder:text-[#8a7d72] focus:outline-none focus:ring-1 focus:ring-white/20"
                       />
                     </div>
-                    {filteredMemories.length === 0 && (
+                    {filteredMemories.filter((m) => m.status !== "pending").length === 0 && (
                       <p className="text-xs text-[#8a7d72] px-3 py-4">
                         {memories.length === 0
                           ? "Nothing stored yet. Tell me something about yourself."
@@ -409,18 +484,27 @@ export default function Home() {
                       </p>
                     )}
                     <div className="space-y-1.5 px-2">
-                      {filteredMemories.map((m) => (
+                      {filteredMemories
+                        .filter((m) => m.status !== "pending")
+                        .map((m) => (
                         <div
                           key={m.id}
                           className="group px-3 py-2 rounded-md bg-white/[0.03] hover:bg-white/5 border border-white/5"
                         >
                           <div className="flex items-center justify-between gap-2 mb-1">
-                            <Badge
-                              variant="outline"
-                              className="text-[9px] py-0 px-1.5 border-[#5a4a42] text-[#b8a99c]"
-                            >
-                              {MEMORY_KIND_LABELS[m.kind] ?? m.kind}
-                            </Badge>
+                            <div className="flex items-center gap-1.5">
+                              <Badge
+                                variant="outline"
+                                className="text-[9px] py-0 px-1.5 border-[#5a4a42] text-[#b8a99c]"
+                              >
+                                {MEMORY_KIND_LABELS[m.kind] ?? m.kind}
+                              </Badge>
+                              {m.status === "rejected" && (
+                                <span className="text-[9px] text-red-400/60 uppercase tracking-wider">
+                                  rejected
+                                </span>
+                              )}
+                            </div>
                             <div className="flex items-center gap-1">
                               <span className="text-[9px] text-[#8a7d72]">
                                 imp {m.importance}
@@ -550,11 +634,13 @@ function TabButton({
   onClick,
   icon,
   label,
+  badge,
 }: {
   active: boolean;
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
+  badge?: number;
 }) {
   return (
     <button
@@ -567,6 +653,11 @@ function TabButton({
     >
       {icon}
       {label}
+      {badge != null && badge > 0 && (
+        <span className="ml-0.5 px-1 py-0 rounded-full bg-amber-400/20 text-amber-400 text-[8px] font-medium leading-none flex items-center justify-center min-w-[14px] h-[14px]">
+          {badge}
+        </span>
+      )}
     </button>
   );
 }
