@@ -38,18 +38,15 @@ export const VOICE_PRESETS: Record<VoicePreset, PresetConfig> = {
   friday: {
     // Lower pitch ~2.5 semitones for that calm, capable alto
     pitch: -2.5,
-    // Slightly slower — but less than before (0.98 vs 0.95) so pauses
-    // at punctuation aren't stretched as much.
-    tempo: 0.98,
+    // Slightly slower — Friday speaks with deliberate calm
+    tempo: 0.95,
     // Subtle room reverb for intimate, in-your-ear presence
-    reverb: 12,
+    reverb: 18,
     // Smooth highs — Friday never sounds shrill
     treble: -1.5,
     // Warm low-end
     bass: 2.0,
-    // Louder — bumped to +15 for clear audibility without loudnorm
-    // (compand + limiter gives consistent ~-20dB mean; +15 gain → ~-12dB)
-    gain: 15,
+    gain: 1.5,
     label: "Friday",
     description: "Calm alto, subtle reverb, intimate presence. Closest to Iron Man's assistant.",
   },

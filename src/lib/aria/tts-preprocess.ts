@@ -208,38 +208,41 @@ export interface TtsChunk {
   pauseAfter: number; // ms
 }
 
-export function chunkForTTS(text: string, maxLen = 1200): TtsChunk[] {
+export function chunkForTTS(text: string, maxLen = 800): TtsChunk[] {
   const cleaned = preprocessForTTS(text);
   if (!cleaned) return [];
 
-  // The Z.ai TTS API rate-limits aggressively — each API call can take
-  // 2-20s due to rate-limit retries. To avoid inter-chunk gaps, we
-  // minimize the number of chunks.
-  //
-  // Strategy:
-  // - Responses under 1000 chars: SINGLE chunk (one API call, no gaps)
-  // - Responses 1000+ chars: split into 2 chunks (first sentence + rest)
-  //   with prefetching so the second chunk loads while the first plays.
-  if (cleaned.length <= 1000) {
+  // Simple strategy: single chunk for most responses (under 800 chars),
+  // split into 2 for longer ones. Keep it simple — don't over-chunk.
+  if (cleaned.length <= 800) {
     return [{ text: cleaned, pauseAfter: 0 }];
   }
 
-  // For long responses: first sentence as own chunk (fast TTS start),
-  // then the rest as a single chunk.
+  // For long responses: split on sentence boundaries, group into chunks
+  // of up to maxLen chars.
   const sentences = cleaned.match(/[^.!?]+[.!?]+|\S[^.!?]*$/g) ?? [cleaned];
   const trimmedSentences = sentences.map((s) => s.trim()).filter(Boolean);
   if (trimmedSentences.length === 0) return [{ text: cleaned, pauseAfter: 0 }];
 
-  const chunks: TtsChunk[] = [
-    {
-      text: trimmedSentences[0],
-      pauseAfter: 120, // tight conversational pause
-    },
-  ];
-
-  const rest = trimmedSentences.slice(1).join(" ");
-  if (rest) {
-    chunks.push({ text: rest, pauseAfter: 0 });
+  const chunks: TtsChunk[] = [];
+  let current = "";
+  let currentLen = 0;
+  for (const sentence of trimmedSentences) {
+    if (current && currentLen + sentence.length + 1 > maxLen) {
+      chunks.push({ text: current, pauseAfter: 300 });
+      current = "";
+      currentLen = 0;
+    }
+    if (current) {
+      current += " " + sentence;
+      currentLen += sentence.length + 1;
+    } else {
+      current = sentence;
+      currentLen = sentence.length;
+    }
+  }
+  if (current) {
+    chunks.push({ text: current, pauseAfter: 0 });
   }
 
   return chunks;

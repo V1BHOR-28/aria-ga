@@ -72,13 +72,12 @@ function buildFilterChain(cfg: typeof VOICE_PRESETS["friday"]): string {
   const filters: string[] = [];
 
   // 1. Pitch shift + tempo via rubberband (formant-preserving)
-  //    transients=crisp preserves transient sounds at punctuation boundaries
-  //    instead of smearing across them (fixes "stuck on punctuations").
+  //    transients=smooth for natural sound — no smearing artifacts.
   if (cfg.pitch !== 0 || cfg.tempo !== 1.0) {
     const pitchMult = Math.pow(2, cfg.pitch / 12);
     const tempoMult = cfg.tempo;
     filters.push(
-      `rubberband=tempo=${tempoMult.toFixed(4)}:pitch=${pitchMult.toFixed(4)}:formant=preserved:transients=crisp:phase=laminar:channels=together:pitchq=quality`
+      `rubberband=tempo=${tempoMult.toFixed(4)}:pitch=${pitchMult.toFixed(4)}:formant=preserved:transients=smooth:phase=laminar:channels=together:pitchq=quality`
     );
   }
 
@@ -100,41 +99,10 @@ function buildFilterChain(cfg: typeof VOICE_PRESETS["friday"]): string {
     );
   }
 
-  // 4. Trim excessive pauses at punctuation.
-  //    The TTS engine generates natural pauses at commas/periods, and the
-  //    rubberband tempo stretch lengthens them. silenceremove detects
-  //    silence below -40dB and caps each pause at 120ms — so punctuation
-  //    still gets a natural micro-pause but not a long gap.
-  //    window_samples=82 (~3ms at 24kHz) for precise detection.
-  filters.push(
-    "silenceremove=window=0.03:stop_periods=-1:stop_silence=0.12:stop_threshold=-40dB:detection=peak"
-  );
-
-  // 5. Gain
+  // 4. Gain
   if (cfg.gain !== 0) {
     filters.push(`volume=${cfg.gain > 0 ? "+" : ""}${cfg.gain}dB`);
   }
-
-  // 6. Compressor — reduces dynamic range so quiet and loud passages
-  //    are closer in volume. This is the key to consistent loudness.
-  //
-  //    compand params:
-  //    - attacks=0:decays=100ms (fast attack, smooth release)
-  //    - points: -80/-80|-60/-30|-40/-20|-20/-12|0/-3
-  //      Below -60dB: leave alone (silence / background noise)
-  //      -60→-30: huge boost (very quiet speech → audible)
-  //      -40→-20: boost (quiet speech → normal)
-  //      -20→-12: slight boost (normal speech → louder)
-  //      0→-3: slight attenuation (loud peaks → controlled)
-  filters.push(
-    "compand=attacks=0:decays=0.1:points=-80/-80|-60/-30|-40/-20|-20/-12|0/-3:soft-knee=6"
-  );
-
-  // 7. Limiter — hard ceiling at -1dB to prevent any clipping.
-  //    This + compand gives us consistent loudness without the slow
-  //    loudnorm filter (which caused 7-10s TTS generation times due to
-  //    its internal analysis pass).
-  filters.push("alimiter=limit=0.89:level=disabled");
 
   return filters.join(",");
 }
