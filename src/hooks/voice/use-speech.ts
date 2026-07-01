@@ -1,37 +1,60 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { chunkForTTS } from "@/lib/aria/tts-preprocess";
 
 interface UseSpeechReturn {
   speaking: boolean;
-  loading: boolean; // fetching TTS audio
-  currentId: string | null; // id of message currently being spoken
+  loading: boolean; // fetching first TTS chunk
+  currentId: string | null;
   error: string | null;
+  progress: { current: number; total: number } | null;
+  speed: number;
+  setSpeed: (s: number) => void;
   speak: (id: string, text: string) => Promise<void>;
   stop: () => void;
   toggle: (id: string, text: string) => Promise<void>;
 }
 
+const DEFAULT_SPEED = 0.9;
+
 /**
- * Plays TTS audio for ARIA's responses. Manages a single audio element
- * so starting a new utterance stops the previous one.
+ * Plays TTS audio for ARIA's responses — chunked sentence-by-sentence
+ * for natural cadence. Each sentence is a separate TTS call, and we
+ * insert a small pause between them so ARIA sounds like she's talking,
+ * not reading.
  *
  * State machine: idle -> loading -> speaking -> idle
- * Errors are surfaced via `error` so the UI can show them.
  */
 export function useSpeech(): UseSpeechReturn {
   const [speaking, setSpeaking] = useState(false);
   const [loading, setLoading] = useState(false);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
+  const [speed, setSpeedState] = useState(DEFAULT_SPEED);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  // Track current id in a ref so async callbacks can read the latest value
-  // without stale closures.
   const currentIdRef = useRef<string | null>(null);
+  const stoppedRef = useRef<boolean>(false);
+  const speedRef = useRef<number>(DEFAULT_SPEED);
+
+  // Keep speedRef in sync with state so async loops read the latest value
+  useEffect(() => {
+    speedRef.current = speed;
+  }, [speed]);
+
+  const setSpeed = useCallback((s: number) => {
+    const clamped = Math.min(1.5, Math.max(0.5, s));
+    setSpeedState(clamped);
+  }, []);
 
   const stop = useCallback(() => {
+    stoppedRef.current = true;
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
@@ -44,132 +67,178 @@ export function useSpeech(): UseSpeechReturn {
     setLoading(false);
     setCurrentId(null);
     currentIdRef.current = null;
+    setProgress(null);
   }, []);
 
-  const speak = useCallback(async (id: string, text: string) => {
-    // Stop anything currently playing
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
+  const fetchChunk = useCallback(
+    async (text: string, signal: AbortSignal): Promise<Blob | null> => {
+      const MAX_RETRIES = 3;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        if (signal.aborted) return null;
+        try {
+          const res = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text, speed: speedRef.current }),
+            signal,
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            const errMsg =
+              typeof err === "object" ? err.error || "" : String(err);
 
-    const clean = text.trim();
-    if (!clean) return;
+            // 429 = rate limited — retry with exponential backoff
+            if (res.status === 500 && /429|Too many requests/i.test(errMsg)) {
+              if (attempt < MAX_RETRIES) {
+                const delay = 800 * Math.pow(2, attempt); // 800ms, 1.6s, 3.2s
+                await new Promise((r) => setTimeout(r, delay));
+                continue;
+              }
+            }
+            throw new Error(errMsg || `TTS failed (${res.status})`);
+          }
+          const blob = await res.blob();
+          if (blob.size === 0) return null;
+          return blob;
+        } catch (err) {
+          if ((err as Error).name === "AbortError") return null;
+          if (attempt < MAX_RETRIES) {
+            const delay = 800 * Math.pow(2, attempt);
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+          throw err;
+        }
+      }
+      return null;
+    },
+    []
+  );
 
-    setError(null);
-    setLoading(true);
-    setCurrentId(id);
-    currentIdRef.current = id;
+  const playBlob = useCallback(
+    (blob: Blob): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        if (stoppedRef.current) {
+          resolve();
+          return;
+        }
+        if (!audioRef.current) {
+          audioRef.current = new Audio();
+        }
+        const audio = audioRef.current;
+        const url = URL.createObjectURL(blob);
+        audio.src = url;
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+        const cleanup = () => {
+          audio.removeEventListener("play", onPlay);
+          audio.removeEventListener("ended", onEnded);
+          audio.removeEventListener("error", onError);
+          URL.revokeObjectURL(url);
+        };
+        const onPlay = () => {
+          // state already set by caller
+        };
+        const onEnded = () => {
+          cleanup();
+          resolve();
+        };
+        const onError = (e: Event) => {
+          cleanup();
+          reject(new Error("Audio playback failed"));
+          void e;
+        };
+        audio.addEventListener("play", onPlay);
+        audio.addEventListener("ended", onEnded);
+        audio.addEventListener("error", onError);
 
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: clean }),
-        signal: controller.signal,
+        audio.play().catch((playErr) => {
+          cleanup();
+          if ((playErr as Error).name === "AbortError") {
+            resolve();
+          } else if ((playErr as Error).name === "NotAllowedError") {
+            reject(new Error("Browser blocked autoplay. Click speak to play."));
+          } else {
+            reject(playErr);
+          }
+        });
       });
+    },
+    []
+  );
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `TTS failed (${res.status})`);
+  const speak = useCallback(
+    async (id: string, text: string) => {
+      // Stop anything currently playing
+      stoppedRef.current = true;
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
       }
-
-      const blob = await res.blob();
-      if (blob.size === 0) {
-        throw new Error("TTS returned empty audio");
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
       }
-      const url = URL.createObjectURL(blob);
+      // Small wait to let prior audio settle
+      await new Promise((r) => setTimeout(r, 50));
+      stoppedRef.current = false;
 
-      // Reuse a single audio element
-      if (!audioRef.current) {
-        audioRef.current = new Audio();
-      }
-      const audio = audioRef.current;
-      audio.src = url;
-      audio.crossOrigin = "anonymous";
+      const chunks = chunkForTTS(text);
+      if (chunks.length === 0) return;
 
-      // Attach handlers BEFORE play() so we don't miss events
-      const onPlay = () => {
-        // Only update state if this is still the current utterance
-        if (currentIdRef.current === id) {
-          setSpeaking(true);
-          setLoading(false);
-        }
-      };
-      const onEnded = () => {
-        if (currentIdRef.current === id) {
-          setSpeaking(false);
-          setCurrentId(null);
-          currentIdRef.current = null;
-        }
-        URL.revokeObjectURL(url);
-        cleanup();
-      };
-      const onError = () => {
-        if (currentIdRef.current === id) {
-          setSpeaking(false);
-          setLoading(false);
-          setCurrentId(null);
-          currentIdRef.current = null;
-          setError("Audio playback failed");
-        }
-        URL.revokeObjectURL(url);
-        cleanup();
-      };
-      const cleanup = () => {
-        audio.removeEventListener("play", onPlay);
-        audio.removeEventListener("ended", onEnded);
-        audio.removeEventListener("error", onError);
-      };
-      audio.addEventListener("play", onPlay);
-      audio.addEventListener("ended", onEnded);
-      audio.addEventListener("error", onError);
+      setError(null);
+      setLoading(true);
+      setCurrentId(id);
+      currentIdRef.current = id;
+      setProgress({ current: 0, total: chunks.length });
 
-      // play() returns a Promise that rejects if autoplay is blocked
+      const controller = new AbortController();
+      abortRef.current = controller;
+
       try {
-        await audio.play();
-      } catch (playErr) {
-        // If autoplay is blocked, we can't do much — surface the error
-        if ((playErr as Error).name === "NotAllowedError") {
-          setError(
-            "Browser blocked autoplay. Click the speaker icon to play."
-          );
-        } else if ((playErr as Error).name === "AbortError") {
-          // Expected when stopping / interrupting
-        } else {
-          setError(`Playback failed: ${(playErr as Error).name}`);
+        for (let i = 0; i < chunks.length; i++) {
+          if (stoppedRef.current) break;
+
+          const chunk = chunks[i];
+          setProgress({ current: i, total: chunks.length });
+
+          // Fetch this chunk (with built-in retry for rate limits)
+          const blob = await fetchChunk(chunk.text, controller.signal);
+          if (!blob || stoppedRef.current) break;
+
+          // First chunk — flip from loading to speaking
+          if (i === 0) {
+            setLoading(false);
+            setSpeaking(true);
+          }
+
+          // Play it
+          await playBlob(blob);
+          if (stoppedRef.current) break;
+
+          // Natural pause between sentences — also serves as rate-limit buffer
+          if (chunk.pauseAfter > 0 && i < chunks.length - 1) {
+            await new Promise((r) => setTimeout(r, chunk.pauseAfter));
+          }
         }
-        setSpeaking(false);
-        setLoading(false);
-        if (currentIdRef.current === id) {
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        const msg = err instanceof Error ? err.message : "TTS failed";
+        if (!stoppedRef.current) {
+          setError(msg);
+        }
+      } finally {
+        if (abortRef.current === controller) abortRef.current = null;
+        if (!stoppedRef.current) {
+          setSpeaking(false);
+          setLoading(false);
           setCurrentId(null);
           currentIdRef.current = null;
+          setProgress(null);
         }
-        cleanup();
-        URL.revokeObjectURL(url);
       }
-    } catch (err) {
-      if ((err as Error).name === "AbortError") return;
-      console.error("[useSpeech]", err);
-      const msg = err instanceof Error ? err.message : "TTS failed";
-      setError(msg);
-      setSpeaking(false);
-      setLoading(false);
-      if (currentIdRef.current === id) {
-        setCurrentId(null);
-        currentIdRef.current = null;
-      }
-    } finally {
-      if (abortRef.current === controller) abortRef.current = null;
-    }
-  }, []);
+    },
+    [fetchChunk, playBlob]
+  );
 
   const toggle = useCallback(
     async (id: string, text: string) => {
@@ -184,12 +253,22 @@ export function useSpeech(): UseSpeechReturn {
 
   useEffect(() => {
     return () => {
+      stoppedRef.current = true;
       if (abortRef.current) abortRef.current.abort();
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
+      if (audioRef.current) audioRef.current.pause();
     };
   }, []);
 
-  return { speaking, loading, currentId, error, speak, stop, toggle };
+  return {
+    speaking,
+    loading,
+    currentId,
+    error,
+    progress,
+    speed,
+    setSpeed,
+    speak,
+    stop,
+    toggle,
+  };
 }

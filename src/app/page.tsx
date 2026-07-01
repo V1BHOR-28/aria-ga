@@ -29,6 +29,7 @@ import { EssenceOrb } from "@/components/aria/essence-orb";
 import { getMoodProfile } from "@/lib/aria/emotions";
 import { useVoiceRecorder } from "@/hooks/voice/use-voice-recorder";
 import { useSpeech } from "@/hooks/voice/use-speech";
+import { VoiceSettings } from "@/components/aria/voice-settings";
 
 // ---------- types ----------
 interface Message {
@@ -573,9 +574,11 @@ export default function Home() {
               )}
               <span className="hidden sm:inline">voice</span>
             </button>
+            {/* Voice settings (speed, test) */}
+            <VoiceSettings speech={speech} />
             <Badge
               variant="outline"
-              className="text-[10px] border-white/10 text-[#b8a99c]"
+              className="text-[10px] border-white/10 text-[#b8a99c] hidden sm:inline-flex"
               style={{
                 color: getMoodProfile(currentMood).color,
                 borderColor: `${getMoodProfile(currentMood).color}40`,
@@ -635,7 +638,12 @@ export default function Home() {
                     />
                   ))}
                 </span>
-                <span>speaking…</span>
+                <span>
+                  speaking
+                  {speech.progress && speech.progress.total > 1
+                    ? ` · sentence ${speech.progress.current + 1}/${speech.progress.total}`
+                    : "…"}
+                </span>
                 <button
                   onClick={() => speech.stop()}
                   className="ml-auto text-[10px] uppercase tracking-wider opacity-70 hover:opacity-100"
