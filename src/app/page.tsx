@@ -105,8 +105,8 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [memorySearch, setMemorySearch] = useState("");
 
-  // voice
-  const [autoSpeak, setAutoSpeak] = useState(false);
+  // voice — auto-speak ON by default so ARIA always talks back
+  const [autoSpeak, setAutoSpeak] = useState(true);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -380,10 +380,18 @@ export default function Home() {
                     </p>
                   )}
                   {conversations.map((c) => (
-                    <button
+                    <div
                       key={c.id}
                       onClick={() => openConversation(c.id)}
-                      className={`w-full text-left px-3 py-2.5 rounded-lg group transition-colors ${
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openConversation(c.id);
+                        }
+                      }}
+                      className={`w-full text-left px-3 py-2.5 rounded-lg group transition-colors cursor-pointer ${
                         activeConv?.id === c.id
                           ? "bg-white/10"
                           : "hover:bg-white/5"
@@ -407,7 +415,7 @@ export default function Home() {
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
-                    </button>
+                    </div>
                   ))}
                 </div>
               )}
@@ -577,6 +585,67 @@ export default function Home() {
             </Badge>
           </div>
         </header>
+
+        {/* Speaking status bar — visible whenever ARIA is talking or loading TTS */}
+        {(speech.speaking || speech.loading || speech.error) && (
+          <div
+            className="px-4 py-1.5 border-b text-[11px] flex items-center gap-2 transition-colors"
+            style={{
+              background: speech.error
+                ? "rgba(220, 80, 70, 0.1)"
+                : `${getMoodProfile(currentMood).color}14`,
+              borderColor: speech.error
+                ? "rgba(220, 80, 70, 0.3)"
+                : `${getMoodProfile(currentMood).color}30`,
+              color: speech.error ? "#f0a8a8" : getMoodProfile(currentMood).color,
+            }}
+          >
+            {speech.error ? (
+              <>
+                <VolumeX className="w-3 h-3 flex-shrink-0" />
+                <span className="truncate">{speech.error}</span>
+                <button
+                  onClick={() => speech.stop()}
+                  className="ml-auto text-[10px] uppercase tracking-wider opacity-70 hover:opacity-100"
+                >
+                  dismiss
+                </button>
+              </>
+            ) : speech.loading ? (
+              <>
+                <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
+                <span>preparing voice…</span>
+              </>
+            ) : (
+              <>
+                <span
+                  className="flex gap-0.5 items-end h-3 flex-shrink-0"
+                  aria-hidden
+                >
+                  {[0, 1, 2, 3].map((i) => (
+                    <span
+                      key={i}
+                      className="w-0.5 rounded-sm animate-pulse"
+                      style={{
+                        height: `${30 + Math.sin(i) * 30 + 40}%`,
+                        background: "currentColor",
+                        animationDelay: `${i * 0.1}s`,
+                        animationDuration: "0.6s",
+                      }}
+                    />
+                  ))}
+                </span>
+                <span>speaking…</span>
+                <button
+                  onClick={() => speech.stop()}
+                  className="ml-auto text-[10px] uppercase tracking-wider opacity-70 hover:opacity-100"
+                >
+                  stop
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Messages + Orb area */}
         <div className="flex-1 flex min-h-0">
