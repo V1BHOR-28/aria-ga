@@ -14,6 +14,11 @@ import {
   X,
   Menu,
   Clock,
+  Mic,
+  Volume2,
+  VolumeX,
+  Square,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -22,6 +27,8 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { EssenceOrb } from "@/components/aria/essence-orb";
 import { getMoodProfile } from "@/lib/aria/emotions";
+import { useVoiceRecorder } from "@/hooks/voice/use-voice-recorder";
+import { useSpeech } from "@/hooks/voice/use-speech";
 
 // ---------- types ----------
 interface Message {
@@ -98,8 +105,37 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [memorySearch, setMemorySearch] = useState("");
 
+  // voice
+  const [autoSpeak, setAutoSpeak] = useState(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const lastSpokenIdRef = useRef<string | null>(null);
+
+  const speech = useSpeech();
+
+  // When a new assistant message arrives and auto-speak is on, speak it.
+  useEffect(() => {
+    if (!autoSpeak) return;
+    const last = messages[messages.length - 1];
+    if (
+      last &&
+      last.role === "assistant" &&
+      last.id !== lastSpokenIdRef.current &&
+      !thinking
+    ) {
+      lastSpokenIdRef.current = last.id;
+      void speech.speak(last.id, last.content);
+    }
+  }, [messages, autoSpeak, thinking, speech]);
+
+  // Voice recorder — on transcription, drop text into input (or send directly)
+  const recorder = useVoiceRecorder({
+    onTranscribed: (text) => {
+      setInput((prev) => (prev ? prev + " " + text : text));
+      inputRef.current?.focus();
+    },
+  });
 
   // ---------- initial load ----------
   useEffect(() => {
@@ -504,7 +540,31 @@ export default function Home() {
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            {/* Auto-speak toggle */}
+            <button
+              onClick={() => {
+                if (autoSpeak) {
+                  speech.stop();
+                  setAutoSpeak(false);
+                } else {
+                  setAutoSpeak(true);
+                }
+              }}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] uppercase tracking-wider transition-colors border ${
+                autoSpeak
+                  ? "bg-[#3a2e28] border-[#7fd1c4]/40 text-[#7fd1c4]"
+                  : "bg-transparent border-white/5 text-[#8a7d72] hover:text-[#e8e2db] hover:bg-white/5"
+              }`}
+              title={autoSpeak ? "Auto-speak on — click to turn off" : "Turn on auto-speak"}
+            >
+              {autoSpeak ? (
+                <Volume2 className="w-3 h-3" />
+              ) : (
+                <VolumeX className="w-3 h-3" />
+              )}
+              <span className="hidden sm:inline">voice</span>
+            </button>
             <Badge
               variant="outline"
               className="text-[10px] border-white/10 text-[#b8a99c]"
@@ -572,7 +632,7 @@ export default function Home() {
               ) : (
                 <div className="max-w-3xl mx-auto space-y-6">
                   {messages.map((m) => (
-                    <MessageBubble key={m.id} message={m} />
+                    <MessageBubble key={m.id} message={m} speech={speech} />
                   ))}
                   {thinking && (
                     <div className="flex gap-3 max-w-3xl mx-auto">
@@ -593,20 +653,100 @@ export default function Home() {
             {/* Composer */}
             <div className="border-t border-white/5 bg-[#1a1614]/80 backdrop-blur-sm px-4 md:px-8 py-4">
               <div className="max-w-3xl mx-auto">
+                {/* Recording indicator */}
+                {recorder.recording && (
+                  <div className="mb-2 flex items-center gap-3 px-3 py-2 rounded-xl bg-[#3a2e28] border border-red-400/30">
+                    <span className="relative flex h-2.5 w-2.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-400" />
+                    </span>
+                    <span className="text-xs text-[#e8e2db]">
+                      listening…
+                    </span>
+                    {/* Live audio level meter */}
+                    <div className="flex-1 flex items-center gap-0.5 h-4">
+                      {[...Array(20)].map((_, i) => {
+                        const threshold = i / 20;
+                        const active = recorder.audioLevel > threshold;
+                        return (
+                          <div
+                            key={i}
+                            className="flex-1 rounded-sm transition-all"
+                            style={{
+                              height: active
+                                ? `${4 + (i / 20) * 12}px`
+                                : "2px",
+                              background: active
+                                ? `hsl(${10 + i * 4}, 80%, 60%)`
+                                : "rgba(255,255,255,0.1)",
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+                    <button
+                      onClick={() => recorder.stop()}
+                      className="text-[10px] uppercase tracking-wider text-red-300 hover:text-red-200 px-2 py-1 rounded border border-red-400/30"
+                    >
+                      stop
+                    </button>
+                  </div>
+                )}
+                {/* Transcribing indicator */}
+                {recorder.loading && (
+                  <div className="mb-2 flex items-center gap-2 px-3 py-2 rounded-xl bg-[#3a2e28] border border-white/5">
+                    <Loader2 className="w-3 h-3 animate-spin text-[#7fd1c4]" />
+                    <span className="text-xs text-[#8a7d72]">
+                      transcribing your voice…
+                    </span>
+                  </div>
+                )}
+                {/* Recorder error */}
+                {recorder.error && (
+                  <div className="mb-2 px-3 py-2 rounded-xl bg-red-900/20 border border-red-400/20">
+                    <span className="text-xs text-red-300">
+                      {recorder.error}
+                    </span>
+                  </div>
+                )}
+
                 <div className="relative rounded-2xl bg-[#2a221e] border border-white/5 focus-within:border-white/15 transition-colors">
                   <Textarea
                     ref={inputRef}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="Talk to ARIA…"
+                    placeholder={
+                      recorder.recording
+                        ? "Listening — speak naturally…"
+                        : "Talk to ARIA…"
+                    }
                     rows={1}
-                    disabled={thinking}
-                    className="min-h-[52px] max-h-[200px] resize-none bg-transparent border-0 text-[#e8e2db] placeholder:text-[#8a7d72] focus-visible:ring-0 focus-visible:ring-offset-0 px-4 py-3.5 pr-14 text-sm leading-relaxed"
+                    disabled={thinking || recorder.recording || recorder.loading}
+                    className="min-h-[52px] max-h-[200px] resize-none bg-transparent border-0 text-[#e8e2db] placeholder:text-[#8a7d72] focus-visible:ring-0 focus-visible:ring-offset-0 px-4 py-3.5 pr-24 text-sm leading-relaxed"
                   />
+                  {/* Mic button */}
+                  <button
+                    onClick={() => void recorder.toggle()}
+                    disabled={thinking || recorder.loading}
+                    className={`absolute right-12 bottom-2 w-9 h-9 rounded-xl flex items-center justify-center transition-all disabled:opacity-30 ${
+                      recorder.recording
+                        ? "bg-red-500/20 text-red-300 border border-red-400/40"
+                        : "bg-transparent text-[#8a7d72] hover:text-[#e8e2db] hover:bg-white/5"
+                    }`}
+                    title={recorder.recording ? "Stop recording" : "Speak to ARIA"}
+                    aria-label={recorder.recording ? "Stop recording" : "Start voice input"}
+                  >
+                    {recorder.recording ? (
+                      <Square className="w-4 h-4 fill-current" />
+                    ) : (
+                      <Mic className="w-4 h-4" />
+                    )}
+                  </button>
+                  {/* Send button */}
                   <Button
                     onClick={() => void send()}
-                    disabled={!input.trim() || thinking}
+                    disabled={!input.trim() || thinking || recorder.recording}
                     size="icon"
                     className="absolute right-2 bottom-2 w-9 h-9 rounded-xl bg-[#3a2e28] hover:bg-[#4a3a32] text-[#e8e2db] disabled:opacity-30"
                   >
@@ -614,7 +754,10 @@ export default function Home() {
                   </Button>
                 </div>
                 <div className="text-[10px] text-[#8a7d72] mt-2 flex justify-between">
-                  <span>Enter to send · Shift+Enter for newline</span>
+                  <span>
+                    Enter to send · Shift+Enter for newline · click{" "}
+                    <Mic className="w-2.5 h-2.5 inline -mt-0.5" /> to talk
+                  </span>
                   <span>
                     {memories.length} memories · {moodLogs.length} moods logged
                   </span>
@@ -656,7 +799,13 @@ function TabButton({
   );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+  message,
+  speech,
+}: {
+  message: Message;
+  speech: ReturnType<typeof useSpeech>;
+}) {
   const isUser = message.role === "user";
   const mp = getMoodProfile(message.mood);
 
@@ -670,8 +819,11 @@ function MessageBubble({ message }: { message: Message }) {
     );
   }
 
+  const isCurrentSpeech =
+    speech.currentId === message.id && (speech.speaking || speech.loading);
+
   return (
-    <div className="flex gap-3 max-w-3xl mx-auto">
+    <div className="flex gap-3 max-w-3xl mx-auto group">
       <div
         className="w-8 h-8 rounded-full flex-shrink-0 mt-0.5 flex items-center justify-center text-[10px] font-bold transition-colors duration-700"
         style={{
@@ -699,6 +851,28 @@ function MessageBubble({ message }: { message: Message }) {
               searched web
             </Badge>
           )}
+          {/* Speak button — appears for ARIA messages */}
+          <button
+            onClick={() => void speech.toggle(message.id, message.content)}
+            className={`ml-auto p-1 rounded transition-all ${
+              isCurrentSpeech
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 hover:opacity-100"
+            }`}
+            style={{
+              color: isCurrentSpeech ? mp.color : "#8a7d72",
+            }}
+            title={isCurrentSpeech ? "Stop" : "Listen to this"}
+            aria-label={isCurrentSpeech ? "Stop speaking" : "Speak this message"}
+          >
+            {speech.loading && speech.currentId === message.id ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : speech.speaking && speech.currentId === message.id ? (
+              <Square className="w-3.5 h-3.5 fill-current" />
+            ) : (
+              <Volume2 className="w-3.5 h-3.5" />
+            )}
+          </button>
         </div>
         <div className="text-sm leading-relaxed text-[#d4cabd] whitespace-pre-wrap">
           {message.content}
