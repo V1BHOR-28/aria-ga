@@ -2,34 +2,35 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chunkForTTS } from "@/lib/aria/tts-preprocess";
-import type { VoicePreset } from "@/lib/aria/voice-presets";
+import {
+  loadVoiceSettings,
+  saveVoiceSettings,
+  TTS_PROVIDERS,
+  type TtsProviderId,
+  type VoiceSettings,
+} from "@/lib/aria/tts-providers";
+import {
+  isWebSpeechSupported,
+  primeWebSpeechVoices,
+  speakWithWebSpeech,
+  stopWebSpeech,
+} from "@/lib/aria/tts-web-speech";
 
 interface UseSpeechReturn {
   speaking: boolean;
-  loading: boolean; // fetching first TTS chunk
+  loading: boolean;
   currentId: string | null;
   error: string | null;
   progress: { current: number; total: number } | null;
-  speed: number;
-  setSpeed: (s: number) => void;
-  preset: VoicePreset;
-  setPreset: (p: VoicePreset) => void;
+  // settings
+  settings: VoiceSettings;
+  updateSettings: (patch: Partial<VoiceSettings>) => void;
+  // actions
   speak: (id: string, text: string) => Promise<void>;
   stop: () => void;
   toggle: (id: string, text: string) => Promise<void>;
 }
 
-const DEFAULT_SPEED = 0.9;
-const DEFAULT_PRESET: VoicePreset = "friday";
-
-/**
- * Plays TTS audio for ARIA's responses — chunked sentence-by-sentence
- * for natural cadence. Each sentence is a separate TTS call, and we
- * insert a small pause between them so ARIA sounds like she's talking,
- * not reading.
- *
- * State machine: idle -> loading -> speaking -> idle
- */
 export function useSpeech(): UseSpeechReturn {
   const [speaking, setSpeaking] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -39,32 +40,37 @@ export function useSpeech(): UseSpeechReturn {
     current: number;
     total: number;
   } | null>(null);
-  const [speed, setSpeedState] = useState(DEFAULT_SPEED);
-  const [preset, setPresetState] = useState<VoicePreset>(DEFAULT_PRESET);
+  const [settings, setSettings] = useState<VoiceSettings>(DEFAULT_SETTINGS);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const currentIdRef = useRef<string | null>(null);
   const stoppedRef = useRef<boolean>(false);
-  const speedRef = useRef<number>(DEFAULT_SPEED);
-  const presetRef = useRef<VoicePreset>(DEFAULT_PRESET);
+  const settingsRef = useRef<VoiceSettings>(DEFAULT_SETTINGS);
+  const webSpeechStopRef = useRef<(() => void) | null>(null);
 
-  // Keep speedRef in sync with state so async loops read the latest value
+  // Load settings from localStorage on mount
   useEffect(() => {
-    speedRef.current = speed;
-  }, [speed]);
-
-  useEffect(() => {
-    presetRef.current = preset;
-  }, [preset]);
-
-  const setSpeed = useCallback((s: number) => {
-    const clamped = Math.min(1.5, Math.max(0.5, s));
-    setSpeedState(clamped);
+    const loaded = loadVoiceSettings();
+    setSettings(loaded);
+    settingsRef.current = loaded;
+    // Prime Web Speech voices if needed
+    if (loaded.provider === "web-speech") {
+      void primeWebSpeechVoices();
+    }
   }, []);
 
-  const setPreset = useCallback((p: VoicePreset) => {
-    setPresetState(p);
+  // Keep settingsRef in sync
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  const updateSettings = useCallback((patch: Partial<VoiceSettings>) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch };
+      saveVoiceSettings(next);
+      return next;
+    });
   }, []);
 
   const stop = useCallback(() => {
@@ -77,6 +83,12 @@ export function useSpeech(): UseSpeechReturn {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
     }
+    if (webSpeechStopRef.current) {
+      webSpeechStopRef.current();
+      webSpeechStopRef.current = null;
+    } else {
+      stopWebSpeech();
+    }
     setSpeaking(false);
     setLoading(false);
     setCurrentId(null);
@@ -84,9 +96,70 @@ export function useSpeech(): UseSpeechReturn {
     setProgress(null);
   }, []);
 
+  // ----- Web Speech provider (client-side) -----
+  const speakWithWebSpeechProvider = useCallback(
+    async (id: string, text: string) => {
+      const chunks = chunkForTTS(text);
+      if (chunks.length === 0) return;
+
+      setError(null);
+      setLoading(true);
+      setCurrentId(id);
+      currentIdRef.current = id;
+      setProgress({ current: 0, total: chunks.length });
+      stoppedRef.current = false;
+
+      try {
+        for (let i = 0; i < chunks.length; i++) {
+          if (stoppedRef.current) break;
+          const chunk = chunks[i];
+          setProgress({ current: i, total: chunks.length });
+
+          await new Promise<void>((resolve, reject) => {
+            if (i === 0) {
+              setLoading(false);
+              setSpeaking(true);
+            }
+            const stopFn = speakWithWebSpeech(chunk.text, {
+              voiceId: settingsRef.current.voiceId,
+              speed: settingsRef.current.speed,
+              onEnd: () => resolve(),
+              onError: (err) => reject(new Error(err)),
+            });
+            webSpeechStopRef.current = stopFn;
+          });
+
+          if (stoppedRef.current) break;
+
+          // Pause between chunks
+          if (chunk.pauseAfter > 0 && i < chunks.length - 1) {
+            await new Promise((r) => setTimeout(r, chunk.pauseAfter));
+          }
+        }
+      } catch (err) {
+        if (!stoppedRef.current) {
+          const msg = err instanceof Error ? err.message : "Web Speech failed";
+          setError(msg);
+        }
+      } finally {
+        webSpeechStopRef.current = null;
+        if (!stoppedRef.current) {
+          setSpeaking(false);
+          setLoading(false);
+          setCurrentId(null);
+          currentIdRef.current = null;
+          setProgress(null);
+        }
+      }
+    },
+    []
+  );
+
+  // ----- Server-based providers (zai, elevenlabs) -----
   const fetchChunk = useCallback(
     async (text: string, signal: AbortSignal): Promise<Blob | null> => {
       const MAX_RETRIES = 3;
+      const s = settingsRef.current;
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         if (signal.aborted) return null;
         try {
@@ -95,8 +168,10 @@ export function useSpeech(): UseSpeechReturn {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               text,
-              speed: speedRef.current,
-              preset: presetRef.current,
+              speed: s.speed,
+              provider: s.provider,
+              voiceId: s.voiceId,
+              apiKey: s.apiKeys[s.provider],
             }),
             signal,
           });
@@ -104,12 +179,9 @@ export function useSpeech(): UseSpeechReturn {
             const err = await res.json().catch(() => ({}));
             const errMsg =
               typeof err === "object" ? err.error || "" : String(err);
-
-            // 429 = rate limited — retry with exponential backoff
             if (res.status === 500 && /429|Too many requests/i.test(errMsg)) {
               if (attempt < MAX_RETRIES) {
-                const delay = 800 * Math.pow(2, attempt); // 800ms, 1.6s, 3.2s
-                await new Promise((r) => setTimeout(r, delay));
+                await new Promise((r) => setTimeout(r, 800 * Math.pow(2, attempt)));
                 continue;
               }
             }
@@ -121,8 +193,7 @@ export function useSpeech(): UseSpeechReturn {
         } catch (err) {
           if ((err as Error).name === "AbortError") return null;
           if (attempt < MAX_RETRIES) {
-            const delay = 800 * Math.pow(2, attempt);
-            await new Promise((r) => setTimeout(r, delay));
+            await new Promise((r) => setTimeout(r, 800 * Math.pow(2, attempt)));
             continue;
           }
           throw err;
@@ -133,60 +204,50 @@ export function useSpeech(): UseSpeechReturn {
     []
   );
 
-  const playBlob = useCallback(
-    (blob: Blob): Promise<void> => {
-      return new Promise((resolve, reject) => {
-        if (stoppedRef.current) {
-          resolve();
-          return;
-        }
-        if (!audioRef.current) {
-          audioRef.current = new Audio();
-        }
-        const audio = audioRef.current;
-        const url = URL.createObjectURL(blob);
-        audio.src = url;
+  const playBlob = useCallback((blob: Blob): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      if (stoppedRef.current) {
+        resolve();
+        return;
+      }
+      if (!audioRef.current) {
+        audioRef.current = new Audio();
+      }
+      const audio = audioRef.current;
+      const url = URL.createObjectURL(blob);
+      audio.src = url;
 
-        const cleanup = () => {
-          audio.removeEventListener("play", onPlay);
-          audio.removeEventListener("ended", onEnded);
-          audio.removeEventListener("error", onError);
-          URL.revokeObjectURL(url);
-        };
-        const onPlay = () => {
-          // state already set by caller
-        };
-        const onEnded = () => {
-          cleanup();
-          resolve();
-        };
-        const onError = (e: Event) => {
-          cleanup();
-          reject(new Error("Audio playback failed"));
-          void e;
-        };
-        audio.addEventListener("play", onPlay);
-        audio.addEventListener("ended", onEnded);
-        audio.addEventListener("error", onError);
+      const cleanup = () => {
+        audio.removeEventListener("ended", onEnded);
+        audio.removeEventListener("error", onError);
+        URL.revokeObjectURL(url);
+      };
+      const onEnded = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error("Audio playback failed"));
+      };
+      audio.addEventListener("ended", onEnded);
+      audio.addEventListener("error", onError);
 
-        audio.play().catch((playErr) => {
-          cleanup();
-          if ((playErr as Error).name === "AbortError") {
-            resolve();
-          } else if ((playErr as Error).name === "NotAllowedError") {
-            reject(new Error("Browser blocked autoplay. Click speak to play."));
-          } else {
-            reject(playErr);
-          }
-        });
+      audio.play().catch((playErr) => {
+        cleanup();
+        if ((playErr as Error).name === "AbortError") {
+          resolve();
+        } else if ((playErr as Error).name === "NotAllowedError") {
+          reject(new Error("Browser blocked autoplay. Click speak to play."));
+        } else {
+          reject(playErr);
+        }
       });
-    },
-    []
-  );
+    });
+  }, []);
 
-  const speak = useCallback(
+  const speakWithServerProvider = useCallback(
     async (id: string, text: string) => {
-      // Stop anything currently playing
       stoppedRef.current = true;
       if (abortRef.current) {
         abortRef.current.abort();
@@ -196,7 +257,6 @@ export function useSpeech(): UseSpeechReturn {
         audioRef.current.pause();
         audioRef.current.currentTime = 0;
       }
-      // Small wait to let prior audio settle
       await new Promise((r) => setTimeout(r, 50));
       stoppedRef.current = false;
 
@@ -215,25 +275,20 @@ export function useSpeech(): UseSpeechReturn {
       try {
         for (let i = 0; i < chunks.length; i++) {
           if (stoppedRef.current) break;
-
           const chunk = chunks[i];
           setProgress({ current: i, total: chunks.length });
 
-          // Fetch this chunk (with built-in retry for rate limits)
           const blob = await fetchChunk(chunk.text, controller.signal);
           if (!blob || stoppedRef.current) break;
 
-          // First chunk — flip from loading to speaking
           if (i === 0) {
             setLoading(false);
             setSpeaking(true);
           }
 
-          // Play it
           await playBlob(blob);
           if (stoppedRef.current) break;
 
-          // Natural pause between sentences — also serves as rate-limit buffer
           if (chunk.pauseAfter > 0 && i < chunks.length - 1) {
             await new Promise((r) => setTimeout(r, chunk.pauseAfter));
           }
@@ -258,6 +313,29 @@ export function useSpeech(): UseSpeechReturn {
     [fetchChunk, playBlob]
   );
 
+  // Main speak function — routes to the right provider
+  const speak = useCallback(
+    async (id: string, text: string) => {
+      const s = settingsRef.current;
+
+      // Stop anything currently playing
+      stop();
+      await new Promise((r) => setTimeout(r, 80));
+      stoppedRef.current = false;
+
+      if (s.provider === "web-speech") {
+        if (!isWebSpeechSupported()) {
+          setError("Web Speech API not supported. Try Chrome or Edge.");
+          return;
+        }
+        await speakWithWebSpeechProvider(id, text);
+      } else {
+        await speakWithServerProvider(id, text);
+      }
+    },
+    [stop, speakWithWebSpeechProvider, speakWithServerProvider]
+  );
+
   const toggle = useCallback(
     async (id: string, text: string) => {
       if (currentIdRef.current === id && (speaking || loading)) {
@@ -274,6 +352,7 @@ export function useSpeech(): UseSpeechReturn {
       stoppedRef.current = true;
       if (abortRef.current) abortRef.current.abort();
       if (audioRef.current) audioRef.current.pause();
+      stopWebSpeech();
     };
   }, []);
 
@@ -283,12 +362,20 @@ export function useSpeech(): UseSpeechReturn {
     currentId,
     error,
     progress,
-    speed,
-    setSpeed,
-    preset,
-    setPreset,
+    settings,
+    updateSettings,
     speak,
     stop,
     toggle,
   };
 }
+
+const DEFAULT_SETTINGS: VoiceSettings = {
+  provider: "web-speech",
+  voiceId: "",
+  speed: 1.0,
+  apiKeys: {},
+};
+
+// Re-export for components
+export { TTS_PROVIDERS, type TtsProviderId };
