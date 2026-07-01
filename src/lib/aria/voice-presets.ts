@@ -43,12 +43,11 @@ export const VOICE_PRESETS: Record<VoicePreset, PresetConfig> = {
     // Subtle room reverb for intimate, in-your-ear presence
     reverb: 18,
     // Slightly brighter highs — crisper consonants for British clarity
-    // (was -1.5, now +0.5 to lift the "t" and "k" sounds)
     treble: 0.5,
     // Warm low-end for chest resonance (British alto character)
     bass: 2.5,
-    // Louder — bumped to +14 for clear audibility
-    gain: 14,
+    // Louder — +8 dB for clear audibility without distortion
+    gain: 8,
     label: "Friday",
     description: "Calm British alto, subtle reverb, intimate presence. Closest to Iron Man's assistant.",
   },
