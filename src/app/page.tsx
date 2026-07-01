@@ -8,12 +8,10 @@ import {
   Brain,
   Activity,
   MessageSquare,
-  Sparkles,
   Search,
   X,
   Menu,
   Clock,
-  Loader2,
   VolumeX,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -21,6 +19,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { EssenceOrb } from "@/components/aria/essence-orb";
+import { Logo, Wordmark } from "@/components/aria/logo";
+import { Onboarding, hasOnboarded } from "@/components/aria/onboarding";
 import { getMoodProfile } from "@/lib/aria/emotions";
 import { useSpeech } from "@/hooks/voice/use-speech";
 import { VoiceSettings } from "@/components/aria/voice-settings";
@@ -98,7 +98,21 @@ export default function Home() {
   // Mobile mode toggle: "text" | "voice" — on desktop both are visible side-by-side
   const [mobileMode, setMobileMode] = useState<"text" | "voice">("text");
 
+  // Onboarding — show on first run only.
+  const [showOnboarding, setShowOnboarding] = useState(false);
+
   const speech = useSpeech();
+
+  useEffect(() => {
+    // Check onboarding status after mount. Defer the setState to avoid
+    // the set-state-in-effect lint rule (this is a legitimate one-time
+    // client-side check that can't be done during SSR).
+    Promise.resolve().then(() => {
+      if (typeof window !== "undefined" && !hasOnboarded()) {
+        setShowOnboarding(true);
+      }
+    });
+  }, []);
 
   const loadConversations = async () => {
     try {
@@ -198,7 +212,7 @@ export default function Home() {
   const mp = getMoodProfile(currentMood);
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-[#1a1614] text-[#e8e2db] flex flex-col">
+    <div className="h-screen w-screen overflow-hidden bg-[#16110e] text-[#ece5dc] flex flex-col">
       {/* ambient background glow */}
       <div
         className="pointer-events-none fixed inset-0 transition-all duration-2000"
@@ -208,36 +222,39 @@ export default function Home() {
       />
 
       {/* ===== Top bar ===== */}
-      <header className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 bg-[#1a1614]/80 backdrop-blur-sm relative z-20">
+      <header className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 bg-[#16110e]/80 backdrop-blur-sm relative z-20">
         <div className="flex items-center gap-3">
           <Button
             variant="ghost"
             size="icon"
             onClick={() => setSidebarOpen((v) => !v)}
-            className="text-[#8a7d72] hover:text-[#e8e2db] hover:bg-white/5 h-8 w-8"
+            className="text-[#a89c8e] hover:text-[#ece5dc] hover:bg-white/5 h-8 w-8"
           >
             <Menu className="w-4 h-4" />
           </Button>
-          <div className="flex items-center gap-2">
+          <button
+            onClick={() => setSidebarOpen((v) => !v)}
+            className="flex items-center gap-2.5 hover:opacity-80 transition-opacity"
+          >
+            <Logo size={24} />
+            <Wordmark />
             <div
-              className="w-2 h-2 rounded-full"
+              className="w-1.5 h-1.5 rounded-full ml-1"
               style={{ background: mp.color, boxShadow: `0 0 6px ${mp.color}` }}
+              title={`mood: ${mp.label.toLowerCase()}`}
             />
-            <div>
-              <div className="text-sm font-medium tracking-wide">ARIA</div>
-            </div>
-          </div>
+          </button>
         </div>
 
         <div className="flex items-center gap-2">
           {/* Mobile mode toggle */}
-          <div className="flex md:hidden bg-[#2a221e] rounded-md p-0.5 border border-white/5">
+          <div className="flex md:hidden bg-[#1f1814] rounded-md p-0.5 border border-white/5">
             <button
               onClick={() => setMobileMode("text")}
               className={`px-2.5 py-1 rounded text-[10px] uppercase tracking-wider transition-colors ${
                 mobileMode === "text"
-                  ? "bg-[#3a2e28] text-[#7fd1c4]"
-                  : "text-[#8a7d72]"
+                  ? "bg-[#281f1a] text-[#7fd1c4]"
+                  : "text-[#a89c8e]"
               }`}
             >
               Text
@@ -246,8 +263,8 @@ export default function Home() {
               onClick={() => setMobileMode("voice")}
               className={`px-2.5 py-1 rounded text-[10px] uppercase tracking-wider transition-colors ${
                 mobileMode === "voice"
-                  ? "bg-[#3a2e28] text-[#7fd1c4]"
-                  : "text-[#8a7d72]"
+                  ? "bg-[#281f1a] text-[#7fd1c4]"
+                  : "text-[#a89c8e]"
               }`}
             >
               Voice
@@ -471,9 +488,9 @@ export default function Home() {
               </ScrollArea>
 
               <div className="p-3 border-t border-white/5">
-                <div className="text-[10px] text-[#8a7d72] flex items-center gap-1.5">
-                  <Sparkles className="w-3 h-3" />
-                  ARIA · partner, not product
+                <div className="text-[10px] text-[#6b5f54] flex items-center gap-1.5">
+                  <Logo size={12} />
+                  partner, not product
                 </div>
               </div>
             </motion.div>
@@ -515,6 +532,15 @@ export default function Home() {
           />
         </div>
       </div>
+
+      {/* Onboarding overlay — first run only */}
+      {showOnboarding && (
+        <Onboarding
+          speech={speech}
+          onSettingsChange={speech.updateSettings}
+          onComplete={() => setShowOnboarding(false)}
+        />
+      )}
     </div>
   );
 }
