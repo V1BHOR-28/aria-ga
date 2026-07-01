@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chunkForTTS } from "@/lib/aria/tts-preprocess";
+import type { VoicePreset } from "@/lib/aria/voice-presets";
 
 interface UseSpeechReturn {
   speaking: boolean;
@@ -11,12 +12,15 @@ interface UseSpeechReturn {
   progress: { current: number; total: number } | null;
   speed: number;
   setSpeed: (s: number) => void;
+  preset: VoicePreset;
+  setPreset: (p: VoicePreset) => void;
   speak: (id: string, text: string) => Promise<void>;
   stop: () => void;
   toggle: (id: string, text: string) => Promise<void>;
 }
 
 const DEFAULT_SPEED = 0.9;
+const DEFAULT_PRESET: VoicePreset = "friday";
 
 /**
  * Plays TTS audio for ARIA's responses — chunked sentence-by-sentence
@@ -36,21 +40,31 @@ export function useSpeech(): UseSpeechReturn {
     total: number;
   } | null>(null);
   const [speed, setSpeedState] = useState(DEFAULT_SPEED);
+  const [preset, setPresetState] = useState<VoicePreset>(DEFAULT_PRESET);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const currentIdRef = useRef<string | null>(null);
   const stoppedRef = useRef<boolean>(false);
   const speedRef = useRef<number>(DEFAULT_SPEED);
+  const presetRef = useRef<VoicePreset>(DEFAULT_PRESET);
 
   // Keep speedRef in sync with state so async loops read the latest value
   useEffect(() => {
     speedRef.current = speed;
   }, [speed]);
 
+  useEffect(() => {
+    presetRef.current = preset;
+  }, [preset]);
+
   const setSpeed = useCallback((s: number) => {
     const clamped = Math.min(1.5, Math.max(0.5, s));
     setSpeedState(clamped);
+  }, []);
+
+  const setPreset = useCallback((p: VoicePreset) => {
+    setPresetState(p);
   }, []);
 
   const stop = useCallback(() => {
@@ -79,7 +93,11 @@ export function useSpeech(): UseSpeechReturn {
           const res = await fetch("/api/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text, speed: speedRef.current }),
+            body: JSON.stringify({
+              text,
+              speed: speedRef.current,
+              preset: presetRef.current,
+            }),
             signal,
           });
           if (!res.ok) {
@@ -267,6 +285,8 @@ export function useSpeech(): UseSpeechReturn {
     progress,
     speed,
     setSpeed,
+    preset,
+    setPreset,
     speak,
     stop,
     toggle,

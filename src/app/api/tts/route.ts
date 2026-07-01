@@ -1,15 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import ZAI from "z-ai-web-dev-sdk";
 import { preprocessForTTS } from "@/lib/aria/tts-preprocess";
+import {
+  processVoice,
+  VOICE_PRESETS,
+  type VoicePreset,
+} from "@/lib/aria/voice-process";
 
 export const runtime = "nodejs";
 
 // POST /api/tts
-// body: { text: string, voice?: string, speed?: number, raw?: boolean }
-// returns: audio/wav binary
-//
-// speed: 0.5 - 2.0 (default 0.9 for warmer, more human cadence)
-// raw: if true, skip preprocessing (useful for testing)
+// body: {
+//   text: string,
+//   voice?: string,       // unused — only "tongtong" available
+//   speed?: number,       // 0.5-2.0, default 0.9
+//   preset?: VoicePreset, // "default" | "friday" | "warm" | "crisp" | "deep"
+//   raw?: boolean         // skip preprocessing
+// }
+// returns: audio/wav binary (post-processed for the chosen preset)
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -17,11 +25,13 @@ export async function POST(req: NextRequest) {
       text,
       voice,
       speed,
+      preset,
       raw,
     } = body as {
       text?: string;
       voice?: string;
       speed?: number;
+      preset?: VoicePreset;
       raw?: boolean;
     };
 
@@ -33,7 +43,6 @@ export async function POST(req: NextRequest) {
     }
 
     // Preprocess — strip markdown, symbols, emoji, expand abbreviations.
-    // This is the single biggest lever for "more human" TTS.
     const cleaned = raw ? text : preprocessForTTS(text);
 
     if (!cleaned.trim()) {
@@ -43,20 +52,23 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Truncate very long texts — TTS has practical limits and long
-    // monologues are annoying anyway. ~1200 chars ≈ 1 minute of speech.
+    // Truncate very long texts — ~1200 chars ≈ 1 minute of speech.
     const truncated = cleaned.slice(0, 1200);
 
     // Clamp speed
     const safeSpeed =
       typeof speed === "number" && speed >= 0.5 && speed <= 2.0
         ? speed
-        : 0.9; // default 0.9 — slightly slower = more human
+        : 0.9;
+
+    // Validate preset
+    const safePreset: VoicePreset =
+      preset && preset in VOICE_PRESETS ? preset : "friday";
 
     const zai = await ZAI.create();
     const response = await zai.audio.tts.create({
       input: truncated,
-      voice: voice || "tongtong", // only voice available in this API
+      voice: voice || "tongtong",
       response_format: "wav",
       stream: false,
       speed: safeSpeed,
@@ -72,12 +84,26 @@ export async function POST(req: NextRequest) {
     }
 
     const arrayBuffer = await response.arrayBuffer();
-    return new NextResponse(arrayBuffer, {
+    const inputBuffer = Buffer.from(arrayBuffer);
+
+    // Apply voice post-processing (pitch shift, EQ, reverb) for the chosen
+    // preset. This is how we get closer to a "Friday" voice even though
+    // the underlying TTS only has one voice.
+    let outputBuffer: Buffer;
+    try {
+      outputBuffer = await processVoice(inputBuffer, safePreset);
+    } catch (procErr) {
+      console.error("[/api/tts] voice processing failed, returning raw:", procErr);
+      outputBuffer = inputBuffer;
+    }
+
+    return new NextResponse(outputBuffer, {
       status: 200,
       headers: {
         "Content-Type": "audio/wav",
-        "Content-Length": String(arrayBuffer.byteLength),
+        "Content-Length": String(outputBuffer.byteLength),
         "Cache-Control": "no-store",
+        "X-Voice-Preset": safePreset,
       },
     });
   } catch (err) {
