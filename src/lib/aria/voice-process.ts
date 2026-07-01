@@ -130,13 +130,11 @@ function buildFilterChain(cfg: typeof VOICE_PRESETS["friday"]): string {
     "compand=attacks=0:decays=0.1:points=-80/-80|-60/-30|-40/-20|-20/-12|0/-3:soft-knee=6"
   );
 
-  // 7. Loudness normalization (single-pass mode).
-  //    loudnorm measures the integrated loudness and adjusts to a target.
-  //    I=-16 LUFS is broadcast standard for speech. TP=-1.5 is true-peak
-  //    ceiling. LRA=11 is the loudness range target.
-  //    Single-pass mode (no second measurement file needed) is less
-  //    precise than two-pass but works fine for TTS and is fast.
-  filters.push("loudnorm=I=-16:TP=-1.5:LRA=11:print_format=none");
+  // 7. Limiter — hard ceiling at -1dB to prevent any clipping.
+  //    This + compand gives us consistent loudness without the slow
+  //    loudnorm filter (which caused 7-10s TTS generation times due to
+  //    its internal analysis pass).
+  filters.push("alimiter=limit=0.89:level=disabled");
 
   return filters.join(",");
 }

@@ -42,14 +42,14 @@ export const VOICE_PRESETS: Record<VoicePreset, PresetConfig> = {
     // at punctuation aren't stretched as much.
     tempo: 0.98,
     // Subtle room reverb for intimate, in-your-ear presence
-    // (reduced from 18 to 12 — too much reverb makes her sound quiet)
     reverb: 12,
     // Smooth highs — Friday never sounds shrill
     treble: -1.5,
     // Warm low-end
     bass: 2.0,
-    // Loud — bumped to +5 so she's clearly audible
-    gain: 5,
+    // Louder — bumped to +15 for clear audibility without loudnorm
+    // (compand + limiter gives consistent ~-20dB mean; +15 gain → ~-12dB)
+    gain: 15,
     label: "Friday",
     description: "Calm alto, subtle reverb, intimate presence. Closest to Iron Man's assistant.",
   },

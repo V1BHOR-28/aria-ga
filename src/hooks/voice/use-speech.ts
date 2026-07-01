@@ -273,12 +273,22 @@ export function useSpeech(): UseSpeechReturn {
       abortRef.current = controller;
 
       try {
+        // Prefetching strategy: fetch chunk 0, then while it plays,
+        // fetch chunk 1 in parallel. When chunk 0 finishes, chunk 1
+        // is already loaded — no gap. This eliminates the 4-5s silence
+        // between paragraphs caused by TTS generation latency.
+        let nextBlobPromise: Promise<Blob | null> | null = null;
+
         for (let i = 0; i < chunks.length; i++) {
           if (stoppedRef.current) break;
           const chunk = chunks[i];
           setProgress({ current: i, total: chunks.length });
 
-          const blob = await fetchChunk(chunk.text, controller.signal);
+          // Either use the prefetched blob or fetch the current one
+          const blob = nextBlobPromise
+            ? await nextBlobPromise
+            : await fetchChunk(chunk.text, controller.signal);
+          nextBlobPromise = null;
           if (!blob || stoppedRef.current) break;
 
           if (i === 0) {
@@ -286,9 +296,18 @@ export function useSpeech(): UseSpeechReturn {
             setSpeaking(true);
           }
 
+          // Kick off prefetch of the NEXT chunk while this one plays.
+          // This is the key to eliminating inter-chunk gaps.
+          if (i < chunks.length - 1) {
+            const nextChunk = chunks[i + 1];
+            nextBlobPromise = fetchChunk(nextChunk.text, controller.signal);
+          }
+
           await playBlob(blob);
           if (stoppedRef.current) break;
 
+          // Short pause between chunks — the next blob is already
+          // fetched by now, so this is just a natural breath.
           if (chunk.pauseAfter > 0 && i < chunks.length - 1) {
             await new Promise((r) => setTimeout(r, chunk.pauseAfter));
           }

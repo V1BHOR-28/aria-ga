@@ -208,47 +208,38 @@ export interface TtsChunk {
   pauseAfter: number; // ms
 }
 
-export function chunkForTTS(text: string, maxLen = 500): TtsChunk[] {
+export function chunkForTTS(text: string, maxLen = 1200): TtsChunk[] {
   const cleaned = preprocessForTTS(text);
   if (!cleaned) return [];
 
-  // Split on sentence boundaries (. ? ! ...) but keep the punctuation
-  const sentences = cleaned.match(/[^.!?]+[.!?]+|\S[^.!?]*$/g) ?? [cleaned];
-
-  // Strategy: first sentence as its own chunk (so TTS starts immediately),
-  // then group the rest into larger chunks to minimize API calls.
-  // This gives the "real-time" feel — ARIA starts speaking the first
-  // sentence while the rest is being generated.
-  const chunks: TtsChunk[] = [];
-  const trimmedSentences = sentences.map((s) => s.trim()).filter(Boolean);
-  if (trimmedSentences.length === 0) return [];
-
-  // First sentence = own chunk, short pause after
-  chunks.push({
-    text: trimmedSentences[0],
-    pauseAfter: 150, // tight conversational pause
-  });
-
-  // Group remaining sentences into chunks of up to maxLen chars
-  let current = "";
-  let currentLen = 0;
-  for (let i = 1; i < trimmedSentences.length; i++) {
-    const sentence = trimmedSentences[i];
-    if (current && currentLen + sentence.length + 1 > maxLen) {
-      chunks.push({ text: current, pauseAfter: 150 });
-      current = "";
-      currentLen = 0;
-    }
-    if (current) {
-      current += " " + sentence;
-      currentLen += sentence.length + 1;
-    } else {
-      current = sentence;
-      currentLen = sentence.length;
-    }
+  // The Z.ai TTS API rate-limits aggressively — each API call can take
+  // 2-20s due to rate-limit retries. To avoid inter-chunk gaps, we
+  // minimize the number of chunks.
+  //
+  // Strategy:
+  // - Responses under 1000 chars: SINGLE chunk (one API call, no gaps)
+  // - Responses 1000+ chars: split into 2 chunks (first sentence + rest)
+  //   with prefetching so the second chunk loads while the first plays.
+  if (cleaned.length <= 1000) {
+    return [{ text: cleaned, pauseAfter: 0 }];
   }
-  if (current) {
-    chunks.push({ text: current, pauseAfter: 0 });
+
+  // For long responses: first sentence as own chunk (fast TTS start),
+  // then the rest as a single chunk.
+  const sentences = cleaned.match(/[^.!?]+[.!?]+|\S[^.!?]*$/g) ?? [cleaned];
+  const trimmedSentences = sentences.map((s) => s.trim()).filter(Boolean);
+  if (trimmedSentences.length === 0) return [{ text: cleaned, pauseAfter: 0 }];
+
+  const chunks: TtsChunk[] = [
+    {
+      text: trimmedSentences[0],
+      pauseAfter: 120, // tight conversational pause
+    },
+  ];
+
+  const rest = trimmedSentences.slice(1).join(" ");
+  if (rest) {
+    chunks.push({ text: rest, pauseAfter: 0 });
   }
 
   return chunks;
