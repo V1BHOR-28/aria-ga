@@ -257,7 +257,7 @@ export function useSpeech(): UseSpeechReturn {
         audioRef.current.pause();
         audioRef.current.currentTime = 0;
       }
-      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 20));
       stoppedRef.current = false;
 
       const chunks = chunkForTTS(text);
@@ -320,7 +320,7 @@ export function useSpeech(): UseSpeechReturn {
 
       // Stop anything currently playing
       stop();
-      await new Promise((r) => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 20));
       stoppedRef.current = false;
 
       if (s.provider === "web-speech") {
@@ -371,7 +371,7 @@ export function useSpeech(): UseSpeechReturn {
 }
 
 const DEFAULT_SETTINGS: VoiceSettings = {
-  provider: "web-speech",
+  provider: "zai", // Friday preset — the user's preferred voice
   voiceId: "",
   speed: 1.0,
   apiKeys: {},

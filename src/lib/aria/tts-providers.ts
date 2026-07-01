@@ -67,8 +67,8 @@ export interface VoiceSettings {
 const STORAGE_KEY = "aria-voice-settings";
 
 export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
-  provider: "web-speech",
-  voiceId: "", // empty = pick best female English voice automatically
+  provider: "zai", // Friday preset — the user's preferred voice
+  voiceId: "", // empty = Friday preset's default
   speed: 1.0,
   apiKeys: {},
 };

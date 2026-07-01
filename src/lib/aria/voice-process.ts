@@ -103,6 +103,11 @@ function buildFilterChain(cfg: typeof VOICE_PRESETS["friday"]): string {
     filters.push(`volume=${cfg.gain > 0 ? "+" : ""}${cfg.gain}dB`);
   }
 
+  // Dynamic audio normalization — boosts quiet passages so the voice
+  // stays consistently audible. Single-pass, works well for TTS.
+  // f=150 means it adapts over 150ms windows, p=0.9 is the target peak.
+  filters.push("dynaudnorm=f=150:p=0.9");
+
   return filters.join(",");
 }
 

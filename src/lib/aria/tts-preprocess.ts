@@ -215,24 +215,30 @@ export function chunkForTTS(text: string, maxLen = 500): TtsChunk[] {
   // Split on sentence boundaries (. ? ! ...) but keep the punctuation
   const sentences = cleaned.match(/[^.!?]+[.!?]+|\S[^.!?]*$/g) ?? [cleaned];
 
-  // Group sentences into chunks of up to maxLen chars.
-  // This reduces the number of TTS API calls (avoids rate limiting) while
-  // still breaking very long responses into manageable pieces.
+  // Strategy: first sentence as its own chunk (so TTS starts immediately),
+  // then group the rest into larger chunks to minimize API calls.
+  // This gives the "real-time" feel — ARIA starts speaking the first
+  // sentence while the rest is being generated.
   const chunks: TtsChunk[] = [];
+  const trimmedSentences = sentences.map((s) => s.trim()).filter(Boolean);
+  if (trimmedSentences.length === 0) return [];
+
+  // First sentence = own chunk, short pause after
+  chunks.push({
+    text: trimmedSentences[0],
+    pauseAfter: 150, // tight conversational pause
+  });
+
+  // Group remaining sentences into chunks of up to maxLen chars
   let current = "";
   let currentLen = 0;
-
-  for (const s of sentences) {
-    const sentence = s.trim();
-    if (!sentence) continue;
-
-    // If adding this sentence would exceed maxLen, flush current chunk
+  for (let i = 1; i < trimmedSentences.length; i++) {
+    const sentence = trimmedSentences[i];
     if (current && currentLen + sentence.length + 1 > maxLen) {
-      chunks.push({ text: current, pauseAfter: 400 });
+      chunks.push({ text: current, pauseAfter: 150 });
       current = "";
       currentLen = 0;
     }
-
     if (current) {
       current += " " + sentence;
       currentLen += sentence.length + 1;
@@ -241,7 +247,6 @@ export function chunkForTTS(text: string, maxLen = 500): TtsChunk[] {
       currentLen = sentence.length;
     }
   }
-
   if (current) {
     chunks.push({ text: current, pauseAfter: 0 });
   }
