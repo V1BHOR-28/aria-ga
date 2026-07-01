@@ -13,6 +13,7 @@ import { useSpeech } from "@/hooks/voice/use-speech";
 import { EssenceOrb } from "@/components/aria/essence-orb";
 import { getMoodProfile } from "@/lib/aria/emotions";
 import type { VoiceSettings } from "@/lib/aria/tts-providers";
+import { createAsyncQueue, createSentenceSplitter } from "@/lib/aria/stream-parser";
 
 interface VoiceExchange {
   id: string;
@@ -70,8 +71,29 @@ export function VoiceConversation({
       setThinking(true);
       setPartialUserText(text);
 
+      const exchangeId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `ex-${Date.now()}`;
+
+      // Sentences get pushed here as they arrive from the stream, and
+      // speech.speakStream() pulls from it to start TTS per-sentence
+      // instead of waiting for ARIA's whole reply to finish generating.
+      const sentenceQueue = createAsyncQueue<string>();
+      const splitter = createSentenceSplitter();
+      void speech.speakStream(exchangeId, sentenceQueue);
+
+      setExchanges((prev) => [
+        ...prev,
+        { id: exchangeId, userText: text, ariaText: "", timestamp: Date.now() },
+      ]);
+      setPartialUserText("");
+
+      let fullText = "";
+      let mood: string | undefined;
+
       try {
-        const res = await fetch("/api/chat", {
+        const res = await fetch("/api/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -79,27 +101,81 @@ export function VoiceConversation({
             message: text,
           }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Request failed");
+        if (!res.ok || !res.body) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || "Request failed");
+        }
 
-        if (!conversationId) setConversationId(data.conversationId);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = "";
 
-        const exchange: VoiceExchange = {
-          id: data.message.id,
-          userText: text,
-          ariaText: data.message.content,
-          mood: data.message.mood,
-          timestamp: Date.now(),
-        };
-        setExchanges((prev) => [...prev, exchange]);
-        setPartialUserText("");
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          sseBuffer += decoder.decode(value, { stream: true });
 
-        if (data.message.mood) onMoodChange(data.message.mood);
+          const events = sseBuffer.split("\n\n");
+          sseBuffer = events.pop() ?? "";
 
-        void speech.speak(data.message.id, data.message.content);
+          for (const raw of events) {
+            const line = raw.trim();
+            if (!line.startsWith("data:")) continue;
+            const jsonStr = line.slice(5).trim();
+            if (!jsonStr) continue;
+
+            let evt: any;
+            try {
+              evt = JSON.parse(jsonStr);
+            } catch {
+              continue;
+            }
+
+            switch (evt.type) {
+              case "conversation":
+                if (!conversationId) setConversationId(evt.conversationId);
+                break;
+              case "mood":
+                mood = evt.mood;
+                onMoodChange(evt.mood);
+                setThinking(false);
+                setExchanges((prev) =>
+                  prev.map((ex) => (ex.id === exchangeId ? { ...ex, mood } : ex))
+                );
+                break;
+              case "delta":
+                fullText += evt.text;
+                setExchanges((prev) =>
+                  prev.map((ex) =>
+                    ex.id === exchangeId ? { ...ex, ariaText: fullText, mood } : ex
+                  )
+                );
+                for (const sentence of splitter.push(evt.text)) {
+                  sentenceQueue.push(sentence);
+                }
+                break;
+              case "done":
+                for (const sentence of splitter.flush()) {
+                  sentenceQueue.push(sentence);
+                }
+                sentenceQueue.close();
+                setExchanges((prev) =>
+                  prev.map((ex) =>
+                    ex.id === exchangeId
+                      ? { ...ex, ariaText: evt.content, mood: evt.mood }
+                      : ex
+                  )
+                );
+                break;
+              case "error":
+                throw new Error(evt.error || "Stream error");
+            }
+          }
+        }
       } catch (err) {
         console.error(err);
         setError(err instanceof Error ? err.message : "Something broke");
+        sentenceQueue.close();
       } finally {
         setThinking(false);
       }

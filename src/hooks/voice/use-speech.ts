@@ -27,6 +27,7 @@ interface UseSpeechReturn {
   updateSettings: (patch: Partial<VoiceSettings>) => void;
   // actions
   speak: (id: string, text: string) => Promise<void>;
+  speakStream: (id: string, sentences: AsyncIterable<string>) => Promise<void>;
   stop: () => void;
   toggle: (id: string, text: string) => Promise<void>;
 }
@@ -332,6 +333,98 @@ export function useSpeech(): UseSpeechReturn {
     [fetchChunk, playBlob]
   );
 
+  // ----- Streaming variant (server providers only) -----
+  // Same prefetch-while-playing strategy as speakWithServerProvider, but the
+  // list of chunks isn't known up front — it's pulled from an async source
+  // (sentences arriving from an in-progress LLM stream) as they show up.
+  const speakStreamWithServerProvider = useCallback(
+    async (id: string, sentences: AsyncIterable<string>) => {
+      stoppedRef.current = true;
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+      }
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+      stoppedRef.current = false;
+
+      setError(null);
+      setLoading(true);
+      setCurrentId(id);
+      currentIdRef.current = id;
+      setProgress(null); // total unknown until the stream finishes
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      // Fetch queue: as soon as a sentence arrives, kick off its TTS fetch
+      // immediately (don't wait for the previous one to finish playing).
+      const pending: Promise<Blob | null>[] = [];
+      let producerDone = false;
+      let producerErr: unknown = null;
+
+      const produce = (async () => {
+        try {
+          for await (const sentence of sentences) {
+            if (stoppedRef.current) break;
+            pending.push(fetchChunk(sentence, controller.signal));
+          }
+        } catch (err) {
+          producerErr = err;
+        } finally {
+          producerDone = true;
+        }
+      })();
+
+      let isFirst = true;
+      let i = 0;
+      let total = 0;
+
+      try {
+        while (true) {
+          if (stoppedRef.current) break;
+          if (i >= pending.length) {
+            if (producerDone) break;
+            // Wait briefly for the producer to push more sentences.
+            await new Promise((r) => setTimeout(r, 25));
+            continue;
+          }
+          const blob = await pending[i];
+          total = Math.max(total, pending.length);
+          setProgress({ current: i, total });
+          i++;
+          if (!blob || stoppedRef.current) continue;
+
+          if (isFirst) {
+            setLoading(false);
+            setSpeaking(true);
+            isFirst = false;
+          }
+          await playBlob(blob);
+        }
+        await produce;
+        if (producerErr && !stoppedRef.current) throw producerErr;
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        const msg = err instanceof Error ? err.message : "TTS stream failed";
+        if (!stoppedRef.current) setError(msg);
+      } finally {
+        if (abortRef.current === controller) abortRef.current = null;
+        if (!stoppedRef.current) {
+          setSpeaking(false);
+          setLoading(false);
+          setCurrentId(null);
+          currentIdRef.current = null;
+          setProgress(null);
+        }
+      }
+    },
+    [fetchChunk, playBlob]
+  );
+
   // Main speak function — routes to the right provider
   const speak = useCallback(
     async (id: string, text: string) => {
@@ -353,6 +446,25 @@ export function useSpeech(): UseSpeechReturn {
       }
     },
     [stop, speakWithWebSpeechProvider, speakWithServerProvider]
+  );
+
+  // Streaming entry point — used by voice mode while the LLM reply is still
+  // being generated. Falls back with an error on the web-speech provider
+  // since browser TTS has no clean way to accept a live sentence feed here.
+  const speakStream = useCallback(
+    async (id: string, sentences: AsyncIterable<string>) => {
+      const s = settingsRef.current;
+      stop();
+      await new Promise((r) => setTimeout(r, 20));
+      stoppedRef.current = false;
+
+      if (s.provider === "web-speech") {
+        setError("Streaming speech isn't supported with Browser Voices — pick Friday or ElevenLabs in voice settings.");
+        return;
+      }
+      await speakStreamWithServerProvider(id, sentences);
+    },
+    [stop, speakStreamWithServerProvider]
   );
 
   const toggle = useCallback(
@@ -384,6 +496,7 @@ export function useSpeech(): UseSpeechReturn {
     settings,
     updateSettings,
     speak,
+    speakStream,
     stop,
     toggle,
   };

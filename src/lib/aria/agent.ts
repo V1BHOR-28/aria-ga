@@ -5,6 +5,7 @@
 import ZAI from "z-ai-web-dev-sdk";
 import { db } from "@/lib/db";
 import { ARIA_SYSTEM_PROMPT } from "./persona";
+import { createAriaStreamParser } from "./stream-parser";
 import type { AgentTurnResult, MemoryKind } from "./types";
 
 // --- Mood tag parsing ----------------------------------------------------
@@ -147,28 +148,28 @@ async function runWebSearch(query: string): Promise<{
   }
 }
 
-// --- Main turn loop ------------------------------------------------------
+// --- Shared turn setup -----------------------------------------------------
+// Steps 1-4 are identical whether we're going to call the LLM in streaming
+// or non-streaming mode, so both runTurn() and runTurnStream() share them.
 
-export interface RunTurnArgs {
-  conversationId: string;
-  userMessage: string;
+interface PreparedTurn {
+  messages: { role: "user" | "assistant" | "system"; content: string }[];
+  toolUsed?: string;
+  toolPayload?: string;
 }
 
-export async function runTurn({
-  conversationId,
-  userMessage,
-}: RunTurnArgs): Promise<AgentTurnResult> {
-  // 1. Fetch recent conversation history (last 12 messages)
+async function prepareTurn(
+  conversationId: string,
+  userMessage: string
+): Promise<PreparedTurn> {
   const history = await db.message.findMany({
     where: { conversationId },
     orderBy: { createdAt: "asc" },
     take: 12,
   });
 
-  // 2. Recall long-term memories
   const memoryBlock = await recallRelevantMemories(userMessage);
 
-  // 3. Decide on web search
   let toolUsed: string | undefined;
   let toolPayload: string | undefined;
   let searchContext = "";
@@ -184,7 +185,6 @@ export async function runTurn({
     }
   }
 
-  // 4. Build the messages array
   const systemContent = [ARIA_SYSTEM_PROMPT, memoryBlock, searchContext]
     .filter(Boolean)
     .join("\n\n---\n\n");
@@ -201,25 +201,21 @@ export async function runTurn({
     { role: "user" as const, content: userMessage },
   ];
 
-  // 5. Call the LLM
-  const zai = await ZAI.create();
-  const completion = await zai.chat.completions.create({
-    messages,
-    thinking: { type: "disabled" },
-    temperature: 0.85,
-  });
+  return { messages, toolUsed, toolPayload };
+}
 
-  const rawContent: string =
-    completion?.choices?.[0]?.message?.content ?? "";
+// Persist memories, mood log, and (if it's the first turn) the conversation
+// title. Shared by both the streaming and non-streaming paths.
+async function finalizeTurn(args: {
+  conversationId: string;
+  userMessage: string;
+  mood: string;
+  memories: { kind: MemoryKind; content: string; importance: number }[];
+}): Promise<void> {
+  const { conversationId, userMessage, mood, memories } = args;
 
-  // 6. Parse mood + memory directives
-  const { mood, content: moodStripped } = parseMoodTag(rawContent);
-  const { cleaned, memories } = parseMemoryTags(moodStripped);
-
-  // 7. Persist new memories
   if (memories.length > 0) {
     for (const mem of memories) {
-      // Dedup: skip if a very similar memory exists
       const existing = await db.memory.findFirst({
         where: { content: { contains: mem.content.slice(0, 40) } },
       });
@@ -235,12 +231,10 @@ export async function runTurn({
     }
   }
 
-  // 8. Log mood
   await db.moodLog.create({
     data: { mood, trigger: userMessage.slice(0, 200) },
   });
 
-  // 9. Update conversation title if it's the first message
   const msgCount = await db.message.count({
     where: { conversationId },
   });
@@ -252,6 +246,158 @@ export async function runTurn({
       data: { title },
     });
   }
+}
+
+// --- Main turn loop (non-streaming) ----------------------------------------
+
+export interface RunTurnArgs {
+  conversationId: string;
+  userMessage: string;
+}
+
+export async function runTurn({
+  conversationId,
+  userMessage,
+}: RunTurnArgs): Promise<AgentTurnResult> {
+  const { messages, toolUsed, toolPayload } = await prepareTurn(
+    conversationId,
+    userMessage
+  );
+
+  const zai = await ZAI.create();
+  const completion = await zai.chat.completions.create({
+    messages,
+    thinking: { type: "disabled" },
+    temperature: 0.85,
+  });
+
+  const rawContent: string =
+    completion?.choices?.[0]?.message?.content ?? "";
+
+  const { mood, content: moodStripped } = parseMoodTag(rawContent);
+  const { cleaned, memories } = parseMemoryTags(moodStripped);
+
+  await finalizeTurn({ conversationId, userMessage, mood, memories });
+
+  return {
+    content: cleaned,
+    rawContent,
+    mood,
+    toolUsed,
+    toolPayload,
+    newMemories: memories,
+  };
+}
+
+// --- Main turn loop (streaming) ---------------------------------------------
+// Same overall behavior as runTurn(), but calls onMood() the instant the
+// mood tag is known and onDelta() for every chunk of newly-visible text as
+// it streams in — so the caller can start TTS on sentence 1 while sentence
+// 4 hasn't been generated yet, instead of waiting for the whole reply.
+
+export interface RunTurnStreamCallbacks {
+  onMood?: (mood: string) => void;
+  onDelta?: (text: string) => void;
+}
+
+export async function runTurnStream(
+  { conversationId, userMessage }: RunTurnArgs,
+  callbacks: RunTurnStreamCallbacks = {}
+): Promise<AgentTurnResult> {
+  const { messages, toolUsed, toolPayload } = await prepareTurn(
+    conversationId,
+    userMessage
+  );
+
+  const zai = await ZAI.create();
+  const response = await zai.chat.completions.create({
+    messages,
+    thinking: { type: "disabled" },
+    temperature: 0.85,
+    stream: true,
+  });
+
+  const parser = createAriaStreamParser();
+  let rawContent = "";
+  let moodAnnounced = false;
+
+  // z-ai-web-dev-sdk returns a raw ReadableStream<Uint8Array> of SSE lines
+  // (OpenAI-compatible: `data: {"choices":[{"delta":{"content":"..."}}]}`)
+  // when stream: true and the response content-type is event-stream/plain.
+  const body: ReadableStream<Uint8Array> | undefined =
+    response && typeof (response as any).getReader === "function"
+      ? (response as unknown as ReadableStream<Uint8Array>)
+      : (response as any)?.body;
+
+  if (!body) {
+    // Fallback: provider didn't actually stream (e.g. local dev stub).
+    // Treat the whole thing as one final delta so callers still work.
+    const full = (response as any)?.choices?.[0]?.message?.content ?? "";
+    rawContent = full;
+    const visible = parser.push(full) + parser.flush();
+    callbacks.onMood?.(parser.getMood());
+    moodAnnounced = true;
+    if (visible) callbacks.onDelta?.(visible);
+  } else {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuffer += decoder.decode(value, { stream: true });
+
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop() ?? ""; // keep the last (possibly partial) line
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const jsonStr = trimmed.slice(5).trim();
+        if (!jsonStr || jsonStr === "[DONE]") continue;
+
+        let parsed: any;
+        try {
+          parsed = JSON.parse(jsonStr);
+        } catch {
+          continue; // skip a malformed SSE chunk rather than kill the turn
+        }
+
+        const delta: string | undefined =
+          parsed?.choices?.[0]?.delta?.content ??
+          parsed?.choices?.[0]?.message?.content;
+        if (!delta) continue;
+
+        rawContent += delta;
+        const visible = parser.push(delta);
+
+        if (!moodAnnounced && parser.getMood()) {
+          callbacks.onMood?.(parser.getMood());
+          moodAnnounced = true;
+        }
+        if (visible) callbacks.onDelta?.(visible);
+      }
+    }
+
+    const finalVisible = parser.flush();
+    if (!moodAnnounced) {
+      callbacks.onMood?.(parser.getMood());
+      moodAnnounced = true;
+    }
+    if (finalVisible) callbacks.onDelta?.(finalVisible);
+  }
+
+  const mood = parser.getMood();
+  const memories = parser.getMemories();
+
+  await finalizeTurn({ conversationId, userMessage, mood, memories });
+
+  // Rebuild the final cleaned text the same way parseMemoryTags() would,
+  // for callers that want the full string (e.g. to persist as a message
+  // row) rather than just the incremental deltas.
+  const { content: moodStripped } = parseMoodTag(rawContent);
+  const { cleaned } = parseMemoryTags(moodStripped);
 
   return {
     content: cleaned,

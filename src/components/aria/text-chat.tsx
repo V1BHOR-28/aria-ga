@@ -108,8 +108,24 @@ export function TextChat({
     setInput("");
     setThinking(true);
 
+    // Create a placeholder assistant message that we'll update as
+    // deltas stream in. This gives the real-time typing effect.
+    const streamMsgId = `stream-${Date.now()}`;
+    const streamMsg: Message = {
+      id: streamMsgId,
+      role: "assistant",
+      content: "",
+      mood: "neutral",
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((prev) => [
+      ...prev.filter((m) => m.id !== tempUserMsg.id),
+      tempUserMsg,
+      streamMsg,
+    ]);
+
     try {
-      const res = await fetch("/api/chat", {
+      const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -117,38 +133,141 @@ export function TextChat({
           message: text,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Request failed");
 
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== tempUserMsg.id),
-        data.userMessage,
-        data.message,
-      ]);
-
-      if (!activeConv) {
-        onConvChange({
-          id: data.conversationId,
-          title: text.slice(0, 50),
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
+      if (!res.ok || !res.body) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `Request failed (${res.status})`);
       }
 
-      if (data.message.mood) onMoodChange(data.message.mood);
+      // Parse the SSE stream manually
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
+      let conversationId: string | null = null;
+      let finalMessageId: string | null = null;
+      let finalMood: string | null = null;
+      let finalContent: string = "";
+      let newConvCreated = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+
+        const lines = sseBuffer.split("\n");
+        sseBuffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const jsonStr = trimmed.slice(5).trim();
+          if (!jsonStr) continue;
+
+          let evt: any;
+          try {
+            evt = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
+
+          if (evt.type === "conversation") {
+            conversationId = evt.conversationId;
+            if (!activeConv) {
+              newConvCreated = true;
+              onConvChange({
+                id: evt.conversationId,
+                title: text.slice(0, 50),
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              });
+            }
+          } else if (evt.type === "mood") {
+            finalMood = evt.mood;
+            if (evt.mood) onMoodChange(evt.mood);
+            // Update the streaming message's mood
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === streamMsgId ? { ...m, mood: evt.mood } : m
+              )
+            );
+          } else if (evt.type === "delta") {
+            finalContent += evt.text;
+            // Append text to the streaming message
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === streamMsgId
+                  ? { ...m, content: m.content + evt.text }
+                  : m
+              )
+            );
+          } else if (evt.type === "done") {
+            finalMessageId = evt.messageId;
+            finalMood = evt.mood;
+            finalContent = evt.content;
+            // Replace the streaming placeholder with the final message
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === streamMsgId
+                  ? {
+                      ...m,
+                      id: evt.messageId,
+                      content: evt.content,
+                      mood: evt.mood,
+                    }
+                  : m
+              )
+            );
+            // Also replace the temp user message with the real one
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === tempUserMsg.id
+                  ? {
+                      ...m,
+                      id: evt.messageId.replace(/[^a-zA-Z0-9]/g, "") + "-user",
+                    }
+                  : m
+              )
+            );
+          } else if (evt.type === "error") {
+            throw new Error(evt.error || "Stream error");
+          }
+        }
+      }
+
+      // If we never got a "done" event (stream ended early), clean up
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === streamMsgId && m.content === ""
+            ? {
+                ...m,
+                content:
+                  "Hmm, I lost my train of thought. Can you try asking that again?",
+                mood: "frustrated",
+              }
+            : m
+        )
+      );
+
+      void conversationId;
+      void finalMessageId;
+      void finalMood;
+      void finalContent;
+      void newConvCreated;
     } catch (err) {
       console.error(err);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `err-${Date.now()}`,
-          role: "assistant",
-          content:
-            "Something broke on my end. Try again — and if it keeps happening, we should look at the logs together.",
-          mood: "frustrated",
-          createdAt: new Date().toISOString(),
-        },
-      ]);
+      // Remove the empty streaming placeholder and show an error
+      setMessages((prev) =>
+        prev
+          .filter((m) => m.id !== streamMsgId)
+          .concat({
+            id: `err-${Date.now()}`,
+            role: "assistant",
+            content:
+              "Something broke on my end. Try again — and if it keeps happening, we should look at the logs together.",
+            mood: "frustrated",
+            createdAt: new Date().toISOString(),
+          })
+      );
     } finally {
       setThinking(false);
     }
@@ -210,18 +329,23 @@ export function TextChat({
             {messages.map((m) => (
               <MessageBubble key={m.id} message={m} speech={speech} />
             ))}
-            {thinking && (
-              <div className="flex gap-3 max-w-2xl mx-auto">
-                <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 bg-gradient-to-br from-[#7fd1c4] to-[#5a9b8f] flex items-center justify-center text-[10px] font-bold text-[#1a1614]">
-                  A
+            {/* Only show the thinking dots if there's no streaming
+                assistant message yet (i.e. waiting for first token) */}
+            {thinking &&
+              !messages.some(
+                (m) => m.role === "assistant" && m.id.startsWith("stream-")
+              ) && (
+                <div className="flex gap-3 max-w-2xl mx-auto">
+                  <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 bg-gradient-to-br from-[#7fd1c4] to-[#5a9b8f] flex items-center justify-center text-[10px] font-bold text-[#1a1614]">
+                    A
+                  </div>
+                  <div className="flex items-center gap-1.5 py-3">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#8a7d72] animate-bounce [animation-delay:-0.3s]" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#8a7d72] animate-bounce [animation-delay:-0.15s]" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#8a7d72] animate-bounce" />
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5 py-3">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#8a7d72] animate-bounce [animation-delay:-0.3s]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#8a7d72] animate-bounce [animation-delay:-0.15s]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#8a7d72] animate-bounce" />
-                </div>
-              </div>
-            )}
+              )}
           </div>
         )}
       </div>
@@ -272,6 +396,7 @@ function MessageBubble({
 }) {
   const isUser = message.role === "user";
   const mp = getMoodProfile(message.mood);
+  const isStreaming = message.id.startsWith("stream-");
 
   if (isUser) {
     return (
@@ -301,10 +426,17 @@ function MessageBubble({
       <div className="flex-1 min-w-0">
         <div className="flex items-baseline gap-2 mb-1">
           <span className="text-xs font-medium text-[#e8e2db]">ARIA</span>
-          <span className="text-[10px] italic" style={{ color: mp.color }}>
-            {mp.label.toLowerCase()}
-          </span>
-          {message.toolUsed && (
+          {isStreaming ? (
+            <span className="text-[10px] italic text-[#7fd1c4] flex items-center gap-1">
+              <span className="w-1 h-1 rounded-full bg-[#7fd1c4] animate-pulse" />
+              typing
+            </span>
+          ) : (
+            <span className="text-[10px] italic" style={{ color: mp.color }}>
+              {mp.label.toLowerCase()}
+            </span>
+          )}
+          {message.toolUsed && !isStreaming && (
             <Badge
               variant="outline"
               className="text-[9px] py-0 px-1.5 border-white/10 text-[#8a7d72]"
@@ -312,28 +444,34 @@ function MessageBubble({
               searched web
             </Badge>
           )}
-          <button
-            onClick={() => void speech.toggle(message.id, message.content)}
-            className={`ml-auto p-1 rounded transition-all ${
-              isCurrentSpeech
-                ? "opacity-100"
-                : "opacity-0 group-hover:opacity-100 hover:opacity-100"
-            }`}
-            style={{ color: isCurrentSpeech ? mp.color : "#8a7d72" }}
-            title={isCurrentSpeech ? "Stop" : "Listen to this"}
-            aria-label={isCurrentSpeech ? "Stop speaking" : "Speak this message"}
-          >
-            {speech.loading && speech.currentId === message.id ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : speech.speaking && speech.currentId === message.id ? (
-              <Square className="w-3.5 h-3.5 fill-current" />
-            ) : (
-              <Volume2 className="w-3.5 h-3.5" />
-            )}
-          </button>
+          {/* Hide speaker button while streaming */}
+          {!isStreaming && (
+            <button
+              onClick={() => void speech.toggle(message.id, message.content)}
+              className={`ml-auto p-1 rounded transition-all ${
+                isCurrentSpeech
+                  ? "opacity-100"
+                  : "opacity-0 group-hover:opacity-100 hover:opacity-100"
+              }`}
+              style={{ color: isCurrentSpeech ? mp.color : "#8a7d72" }}
+              title={isCurrentSpeech ? "Stop" : "Listen to this"}
+              aria-label={isCurrentSpeech ? "Stop speaking" : "Speak this message"}
+            >
+              {speech.loading && speech.currentId === message.id ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : speech.speaking && speech.currentId === message.id ? (
+                <Square className="w-3.5 h-3.5 fill-current" />
+              ) : (
+                <Volume2 className="w-3.5 h-3.5" />
+              )}
+            </button>
+          )}
         </div>
         <div className="text-sm leading-relaxed text-[#d4cabd] whitespace-pre-wrap">
           {message.content}
+          {isStreaming && (
+            <span className="inline-block w-1.5 h-4 ml-0.5 bg-[#7fd1c4] animate-pulse align-text-bottom" />
+          )}
         </div>
       </div>
     </div>
