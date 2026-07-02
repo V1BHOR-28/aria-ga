@@ -29,6 +29,7 @@ interface VoiceConversationProps {
   onMoodChange: (mood: string) => void;
   settings: VoiceSettings;
   onSettingsChange: (patch: Partial<VoiceSettings>) => void;
+  onAuthError?: () => void;
 }
 
 const LANG_LABELS: Record<RecognitionLang, string> = {
@@ -54,6 +55,7 @@ export function VoiceConversation({
   onMoodChange,
   settings,
   onSettingsChange,
+  onAuthError,
 }: VoiceConversationProps) {
   const [exchanges, setExchanges] = useState<VoiceExchange[]>([]);
   const [thinking, setThinking] = useState(false);
@@ -96,6 +98,7 @@ export function VoiceConversation({
         const res = await fetch("/api/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
           body: JSON.stringify({
             conversationId: conversationId ?? undefined,
             message: text,
@@ -103,6 +106,11 @@ export function VoiceConversation({
         });
         if (!res.ok || !res.body) {
           const data = await res.json().catch(() => ({}));
+          if (res.status === 401) {
+            onAuthError?.();
+            setError("Session expired. Please sign in again.");
+            return;
+          }
           throw new Error(data.error || "Request failed");
         }
 

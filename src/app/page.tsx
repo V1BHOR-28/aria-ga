@@ -624,6 +624,7 @@ export default function Home() {
               void loadMemories();
               void loadMoods();
             }}
+            onAuthError={() => void logout()}
           />
         </div>
 
@@ -639,6 +640,7 @@ export default function Home() {
             onMoodChange={setCurrentMood}
             settings={speech.settings}
             onSettingsChange={speech.updateSettings}
+            onAuthError={() => void logout()}
           />
         </div>
       </div>

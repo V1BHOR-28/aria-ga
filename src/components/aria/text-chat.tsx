@@ -33,6 +33,7 @@ interface TextChatProps {
   activeConv: Conversation | null;
   onConvChange: (conv: Conversation | null) => void;
   onMessagesChange?: (count: number) => void;
+  onAuthError?: () => void;
 }
 
 export function TextChat({
@@ -41,6 +42,7 @@ export function TextChat({
   onMoodChange,
   activeConv,
   onConvChange,
+  onAuthError,
 }: TextChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -128,6 +130,7 @@ export function TextChat({
       const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
         body: JSON.stringify({
           conversationId: activeConv?.id,
           message: text,
@@ -136,6 +139,10 @@ export function TextChat({
 
       if (!res.ok || !res.body) {
         const errData = await res.json().catch(() => ({}));
+        if (res.status === 401) {
+          onAuthError?.();
+          throw new Error("Session expired. Please sign in again.");
+        }
         throw new Error(errData.error || `Request failed (${res.status})`);
       }
 
