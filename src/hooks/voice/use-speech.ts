@@ -451,8 +451,9 @@ export function useSpeech(): UseSpeechReturn {
   );
 
   // Streaming entry point — used by voice mode while the LLM reply is still
-  // being generated. Falls back with an error on the web-speech provider
-  // since browser TTS has no clean way to accept a live sentence feed here.
+  // being generated. For Web Speech provider, we collect all sentences and
+  // speak them as a batch (browser TTS doesn't support live sentence feeds,
+  // but it works fine speaking the full text once it's ready).
   const speakStream = useCallback(
     async (id: string, sentences: AsyncIterable<string>) => {
       const s = settingsRef.current;
@@ -461,7 +462,16 @@ export function useSpeech(): UseSpeechReturn {
       stoppedRef.current = false;
 
       if (s.provider === "web-speech") {
-        setError("Streaming speech isn't supported with Browser Voices — pick Friday or ElevenLabs in voice settings.");
+        // Collect all sentences from the stream, then speak them as one batch.
+        // This is slightly less "real-time" than server streaming but works
+        // perfectly with free browser TTS.
+        const collected: string[] = [];
+        for await (const sentence of sentences) {
+          collected.push(sentence);
+        }
+        if (collected.length > 0) {
+          await speakWithWebSpeechProvider(id, collected.join(" "));
+        }
         return;
       }
       await speakStreamWithServerProvider(id, sentences);
