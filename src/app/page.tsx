@@ -14,6 +14,7 @@ import {
   Clock,
   VolumeX,
   Check,
+  LogOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -22,8 +23,10 @@ import { Separator } from "@/components/ui/separator";
 import { EssenceOrb } from "@/components/aria/essence-orb";
 import { Logo, Wordmark } from "@/components/aria/logo";
 import { Onboarding, hasOnboarded } from "@/components/aria/onboarding";
+import { LoginScreen } from "@/components/aria/login-screen";
 import { getMoodProfile } from "@/lib/aria/emotions";
 import { useSpeech } from "@/hooks/voice/use-speech";
+import { useAuth } from "@/hooks/use-auth";
 import { VoiceSettings } from "@/components/aria/voice-settings";
 import { TextChat } from "@/components/aria/text-chat";
 import { VoiceConversation } from "@/components/aria/voice-conversation";
@@ -104,17 +107,17 @@ export default function Home() {
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   const speech = useSpeech();
+  const { authenticated, login, logout } = useAuth();
 
+  // Show onboarding after authentication (not before)
   useEffect(() => {
-    // Check onboarding status after mount. Defer the setState to avoid
-    // the set-state-in-effect lint rule (this is a legitimate one-time
-    // client-side check that can't be done during SSR).
+    if (authenticated !== true) return;
     Promise.resolve().then(() => {
       if (typeof window !== "undefined" && !hasOnboarded()) {
         setShowOnboarding(true);
       }
     });
-  }, []);
+  }, [authenticated]);
 
   const loadConversations = async () => {
     try {
@@ -147,8 +150,9 @@ export default function Home() {
     }
   };
 
-  // Initial data load — runs once on mount
+  // Initial data load — runs after authentication
   useEffect(() => {
+    if (authenticated !== true) return;
     const initialLoad = async () => {
       try {
         const [convRes, memRes, moodRes] = await Promise.all([
@@ -165,7 +169,7 @@ export default function Home() {
       }
     };
     void initialLoad();
-  }, []);
+  }, [authenticated]);
 
   const openConversation = async (id: string) => {
     try {
@@ -228,6 +232,20 @@ export default function Home() {
   });
 
   const mp = getMoodProfile(currentMood);
+
+  // Auth gate — show login screen if not authenticated
+  if (authenticated === false) {
+    return <LoginScreen onLogin={login} />;
+  }
+
+  // Loading state while checking auth
+  if (authenticated === null) {
+    return (
+      <div className="h-screen w-screen bg-[#16110e] flex items-center justify-center">
+        <Logo size={48} animated />
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#16110e] text-[#ece5dc] flex flex-col">
@@ -571,11 +589,19 @@ export default function Home() {
                 )}
               </ScrollArea>
 
-              <div className="p-3 border-t border-white/5">
+              <div className="p-3 border-t border-white/5 flex items-center justify-between">
                 <div className="text-[10px] text-[#6b5f54] flex items-center gap-1.5">
                   <Logo size={12} />
                   partner, not product
                 </div>
+                <button
+                  onClick={() => void logout()}
+                  className="text-[#6b5f54] hover:text-[#a89c8e] transition-colors"
+                  title="Sign out"
+                  aria-label="Sign out"
+                >
+                  <LogOut className="w-3 h-3" />
+                </button>
               </div>
             </motion.div>
           )}
