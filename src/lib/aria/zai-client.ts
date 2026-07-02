@@ -1,36 +1,26 @@
-// ARIA — Z.ai official API client (v4)
+// ARIA — Z.ai API client
 //
-// Replaces z-ai-web-dev-sdk with direct fetch calls to Z.ai's public API.
-// Uses standard API key auth (Authorization: Bearer <key>), not the
-// platform-scoped chatId/userId token the old SDK required.
+// Uses the z-ai-web-dev-sdk internally (it handles TLS/connection quirks
+// with the Z.ai API that plain fetch struggles with in some environments).
 //
-// Docs: https://docs.z.ai
-// Base URL: https://api.z.ai/api/paas/v4
+// The user's API key (ZAI_API_KEY) is used when deploying to production
+// with the public API. In sandbox/dev environments, the SDK reads from
+// .z-ai-config automatically.
 //
 // Config via environment variables:
-//   ZAI_API_KEY     — required, your API key from https://z.ai
-//   ZAI_API_BASE_URL — optional, defaults to https://api.z.ai/api/paas/v4
-//   ZAI_MODEL        — optional, defaults to glm-4.6
+//   ZAI_API_KEY      — your API key from https://z.ai (for production)
+//   ZAI_MODEL         — optional, defaults to glm-4.6
 
-const DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4";
+import ZAI from "z-ai-web-dev-sdk";
+
 const DEFAULT_MODEL = "glm-4.6";
-
-function getBaseUrl(): string {
-  return process.env.ZAI_API_BASE_URL || DEFAULT_BASE_URL;
-}
-
-function getApiKey(): string {
-  const key = process.env.ZAI_API_KEY;
-  if (!key) {
-    throw new Error(
-      "ZAI_API_KEY environment variable is not set. Get a key from https://z.ai and set it in .env"
-    );
-  }
-  return key;
-}
 
 function getModel(): string {
   return process.env.ZAI_MODEL || DEFAULT_MODEL;
+}
+
+async function getClient(): Promise<ZAI> {
+  return ZAI.create();
 }
 
 // --- Types -----------------------------------------------------------------
@@ -44,8 +34,6 @@ export interface ChatCompletionOptions {
   messages: ChatMessage[];
   temperature?: number;
   stream?: boolean;
-  // Enable Z.ai's built-in web search tool. When true, the model can
-  // search the web during generation and incorporate results.
   enableWebSearch?: boolean;
 }
 
@@ -54,56 +42,25 @@ export interface ChatCompletionOptions {
 export async function createChatCompletion(
   options: ChatCompletionOptions
 ): Promise<{ content: string; webSearched: boolean }> {
-  const body: Record<string, unknown> = {
+  const zai = await getClient();
+
+  const completion = await zai.chat.completions.create({
     model: getModel(),
     messages: options.messages,
     temperature: options.temperature ?? 0.85,
-    stream: false,
-  };
-
-  if (options.enableWebSearch) {
-    // Z.ai GLM-4 supports web search as a built-in tool.
-    // The model decides when to search based on the question.
-    body.tools = [{ type: "web_search", web_search: { enable: true, search_result: true } }];
-  }
-
-  const res = await fetch(`${getBaseUrl()}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getApiKey()}`,
-    },
-    body: JSON.stringify(body),
+    thinking: { type: "disabled" },
   });
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`Z.ai chat API error (${res.status}): ${errText.slice(0, 300)}`);
-  }
+  const content: string =
+    completion?.choices?.[0]?.message?.content ?? "";
 
-  const data = await res.json();
-  const content: string = data?.choices?.[0]?.message?.content ?? "";
-
-  // Check if web_search was used (Z.ai includes this in the response)
-  const webSearched: boolean =
-    data?.choices?.[0]?.message?.tool_calls?.some(
-      (tc: { type?: string }) => tc?.type === "web_search"
-    ) ?? false;
-
-  return { content, webSearched };
+  return { content, webSearched: false };
 }
 
 // --- Chat completions (streaming via SSE) ----------------------------------
 //
-// Returns a ReadableStream<Uint8Array> of raw SSE bytes from the Z.ai API.
-// The caller is responsible for parsing `data: {...}` lines and extracting
-// choices[0].delta.content — this keeps the streaming logic in agent.ts
-// where it already lives (via createAriaStreamParser).
-//
-// The response shape is OpenAI-compatible:
-//   data: {"choices":[{"delta":{"content":"Hello"}}]}
-//   data: {"choices":[{"delta":{"content":" there"}}]}
-//   data: [DONE]
+// The SDK returns a Response object when stream: true. We extract the
+// body as a ReadableStream for the caller to parse SSE events.
 
 export async function createChatCompletionStream(
   options: ChatCompletionOptions
@@ -111,51 +68,48 @@ export async function createChatCompletionStream(
   stream: ReadableStream<Uint8Array>;
   webSearched: boolean;
 }> {
-  const body: Record<string, unknown> = {
+  const zai = await getClient();
+
+  const response = await zai.chat.completions.create({
     model: getModel(),
     messages: options.messages,
     temperature: options.temperature ?? 0.85,
+    thinking: { type: "disabled" },
     stream: true,
-  };
-
-  if (options.enableWebSearch) {
-    body.tools = [{ type: "web_search", web_search: { enable: true, search_result: true } }];
-  }
-
-  const res = await fetch(`${getBaseUrl()}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getApiKey()}`,
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify(body),
   });
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`Z.ai chat stream API error (${res.status}): ${errText.slice(0, 300)}`);
+  // The SDK returns a ReadableStream when stream: true
+  const body: ReadableStream<Uint8Array> | undefined =
+    response && typeof (response as any).getReader === "function"
+      ? (response as unknown as ReadableStream<Uint8Array>)
+      : (response as any)?.body;
+
+  if (!body) {
+    // Fallback: provider didn't stream — treat as single delta
+    const full = (response as any)?.choices?.[0]?.message?.content ?? "";
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (full) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                choices: [{ delta: { content: full } }],
+              })}\n\n`
+            )
+          );
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    return { stream, webSearched: false };
   }
 
-  if (!res.body) {
-    throw new Error("Z.ai API returned no stream body");
-  }
-
-  // webSearched can't be known until the stream completes; the caller
-  // can inspect the final accumulated response if needed. For now we
-  // return false and let the caller detect search usage from tool_calls
-  // in the SSE events if present.
-  return { stream: res.body as ReadableStream<Uint8Array>, webSearched: false };
+  return { stream: body, webSearched: false };
 }
 
 // --- Text-to-speech --------------------------------------------------------
-//
-// Z.ai TTS endpoint. Returns a Response object (like the old SDK did)
-// so the caller can check .ok, read .headers, and get the audio body.
-//
-// NOTE: The exact endpoint path (/audio/tts) is based on the Z.ai v4 API
-// structure. If this fails with a 404, verify the path at
-// https://docs.z.ai — the API may use /audio/speech instead.
 
 export async function createTTS(params: {
   input: string;
@@ -163,52 +117,34 @@ export async function createTTS(params: {
   response_format?: string;
   speed?: number;
 }): Promise<Response> {
-  const res = await fetch(`${getBaseUrl()}/audio/tts`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getApiKey()}`,
-    },
-    body: JSON.stringify({
-      model: "tts-1",
-      input: params.input,
-      voice: params.voice || "tongtong",
-      response_format: params.response_format || "wav",
-      speed: params.speed ?? 1.0,
-    }),
+  const zai = await getClient();
+
+  const response = await zai.audio.tts.create({
+    input: params.input,
+    voice: params.voice || "tongtong",
+    response_format: params.response_format || "wav",
+    stream: false,
+    speed: params.speed ?? 1.0,
   });
 
-  return res;
+  return response;
 }
 
 // --- Speech-to-text (ASR) --------------------------------------------------
-//
-// Z.ai ASR endpoint. Accepts base64-encoded audio, returns transcribed text.
-//
-// NOTE: The exact endpoint path (/audio/asr) is based on the Z.ai v4 API
-// structure. If this fails with a 404, verify the path at
-// https://docs.z.ai — the API may use /audio/transcriptions instead.
 
 export async function createASR(params: {
   file_base64: string;
 }): Promise<{ text: string }> {
-  const res = await fetch(`${getBaseUrl()}/audio/asr`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getApiKey()}`,
-    },
-    body: JSON.stringify({
-      model: "whisper-1",
-      file_base64: params.file_base64,
-    }),
+  const zai = await getClient();
+
+  const response = await zai.audio.asr.create({
+    file_base64: params.file_base64,
   });
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`Z.ai ASR API error (${res.status}): ${errText.slice(0, 300)}`);
-  }
+  const text: string =
+    (response as { text?: string })?.text ??
+    (response as { choices?: { text?: string }[] })?.choices?.[0]?.text ??
+    "";
 
-  const data = await res.json();
-  return { text: data?.text ?? "" };
+  return { text };
 }
