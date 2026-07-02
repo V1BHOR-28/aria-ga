@@ -1,19 +1,12 @@
 // ARIA — Z.ai API client
 //
-// Uses the z-ai-web-dev-sdk internally (it handles TLS/connection quirks
-// with the Z.ai API that plain fetch struggles with in some environments).
-//
-// The user's API key (ZAI_API_KEY) is used when deploying to production
-// with the public API. In sandbox/dev environments, the SDK reads from
-// .z-ai-config automatically.
-//
-// Config via environment variables:
-//   ZAI_API_KEY      — your API key from https://z.ai (for production)
-//   ZAI_MODEL         — optional, defaults to glm-4.6
+// Uses the z-ai-web-dev-sdk internally. Includes automatic retry with
+// exponential backoff for 429 (rate limit) errors.
 
 import ZAI from "z-ai-web-dev-sdk";
 
 const DEFAULT_MODEL = "glm-4.6";
+const MAX_RETRIES = 4;
 
 function getModel(): string {
   return process.env.ZAI_MODEL || DEFAULT_MODEL;
@@ -21,6 +14,19 @@ function getModel(): string {
 
 async function getClient(): Promise<ZAI> {
   return ZAI.create();
+}
+
+// Sleep helper
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Check if an error is a rate-limit (429) error
+function isRateLimitError(err: unknown): boolean {
+  if (err instanceof Error) {
+    return /429|Too many requests/i.test(err.message);
+  }
+  return false;
 }
 
 // --- Types -----------------------------------------------------------------
@@ -37,30 +43,44 @@ export interface ChatCompletionOptions {
   enableWebSearch?: boolean;
 }
 
-// --- Chat completions (non-streaming) --------------------------------------
+// --- Chat completions (non-streaming, with retry) ---------------------------
 
 export async function createChatCompletion(
   options: ChatCompletionOptions
 ): Promise<{ content: string; webSearched: boolean }> {
   const zai = await getClient();
+  let lastErr: unknown;
 
-  const completion = await zai.chat.completions.create({
-    model: getModel(),
-    messages: options.messages,
-    temperature: options.temperature ?? 0.85,
-    thinking: { type: "disabled" },
-  });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const completion = await zai.chat.completions.create({
+        model: getModel(),
+        messages: options.messages,
+        temperature: options.temperature ?? 0.85,
+        thinking: { type: "disabled" },
+      });
 
-  const content: string =
-    completion?.choices?.[0]?.message?.content ?? "";
+      const content: string =
+        completion?.choices?.[0]?.message?.content ?? "";
 
-  return { content, webSearched: false };
+      return { content, webSearched: false };
+    } catch (err) {
+      lastErr = err;
+      if (isRateLimitError(err) && attempt < MAX_RETRIES) {
+        // Exponential backoff: 2s, 4s, 8s
+        const delay = 5000 * Math.pow(2, attempt);
+        console.log(`[zai-client] 429 rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr;
 }
 
-// --- Chat completions (streaming via SSE) ----------------------------------
-//
-// The SDK returns a Response object when stream: true. We extract the
-// body as a ReadableStream for the caller to parse SSE events.
+// --- Chat completions (streaming via SSE, with retry) -----------------------
 
 export async function createChatCompletionStream(
   options: ChatCompletionOptions
@@ -69,47 +89,62 @@ export async function createChatCompletionStream(
   webSearched: boolean;
 }> {
   const zai = await getClient();
+  let lastErr: unknown;
 
-  const response = await zai.chat.completions.create({
-    model: getModel(),
-    messages: options.messages,
-    temperature: options.temperature ?? 0.85,
-    thinking: { type: "disabled" },
-    stream: true,
-  });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await zai.chat.completions.create({
+        model: getModel(),
+        messages: options.messages,
+        temperature: options.temperature ?? 0.85,
+        thinking: { type: "disabled" },
+        stream: true,
+      });
 
-  // The SDK returns a ReadableStream when stream: true
-  const body: ReadableStream<Uint8Array> | undefined =
-    response && typeof (response as any).getReader === "function"
-      ? (response as unknown as ReadableStream<Uint8Array>)
-      : (response as any)?.body;
+      const body: ReadableStream<Uint8Array> | undefined =
+        response && typeof (response as any).getReader === "function"
+          ? (response as unknown as ReadableStream<Uint8Array>)
+          : (response as any)?.body;
 
-  if (!body) {
-    // Fallback: provider didn't stream — treat as single delta
-    const full = (response as any)?.choices?.[0]?.message?.content ?? "";
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        if (full) {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                choices: [{ delta: { content: full } }],
-              })}\n\n`
-            )
-          );
-        }
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-      },
-    });
-    return { stream, webSearched: false };
+      if (!body) {
+        // Fallback: provider didn't stream — treat as single delta
+        const full = (response as any)?.choices?.[0]?.message?.content ?? "";
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            if (full) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    choices: [{ delta: { content: full } }],
+                  })}\n\n`
+                )
+              );
+            }
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        });
+        return { stream, webSearched: false };
+      }
+
+      return { stream: body, webSearched: false };
+    } catch (err) {
+      lastErr = err;
+      if (isRateLimitError(err) && attempt < MAX_RETRIES) {
+        const delay = 5000 * Math.pow(2, attempt);
+        console.log(`[zai-client] 429 rate limited (stream), retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
   }
 
-  return { stream: body, webSearched: false };
+  throw lastErr;
 }
 
-// --- Text-to-speech --------------------------------------------------------
+// --- Text-to-speech (with retry) -------------------------------------------
 
 export async function createTTS(params: {
   input: string;
@@ -118,33 +153,63 @@ export async function createTTS(params: {
   speed?: number;
 }): Promise<Response> {
   const zai = await getClient();
+  let lastErr: unknown;
 
-  const response = await zai.audio.tts.create({
-    input: params.input,
-    voice: params.voice || "tongtong",
-    response_format: params.response_format || "wav",
-    stream: false,
-    speed: params.speed ?? 1.0,
-  });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await zai.audio.tts.create({
+        input: params.input,
+        voice: params.voice || "tongtong",
+        response_format: params.response_format || "wav",
+        stream: false,
+        speed: params.speed ?? 1.0,
+      });
+      return response;
+    } catch (err) {
+      lastErr = err;
+      if (isRateLimitError(err) && attempt < MAX_RETRIES) {
+        const delay = 5000 * Math.pow(2, attempt);
+        console.log(`[zai-client] TTS 429, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
 
-  return response;
+  throw lastErr;
 }
 
-// --- Speech-to-text (ASR) --------------------------------------------------
+// --- Speech-to-text (ASR, with retry) --------------------------------------
 
 export async function createASR(params: {
   file_base64: string;
 }): Promise<{ text: string }> {
   const zai = await getClient();
+  let lastErr: unknown;
 
-  const response = await zai.audio.asr.create({
-    file_base64: params.file_base64,
-  });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await zai.audio.asr.create({
+        file_base64: params.file_base64,
+      });
 
-  const text: string =
-    (response as { text?: string })?.text ??
-    (response as { choices?: { text?: string }[] })?.choices?.[0]?.text ??
-    "";
+      const text: string =
+        (response as { text?: string })?.text ??
+        (response as { choices?: { text?: string }[] })?.choices?.[0]?.text ??
+        "";
 
-  return { text };
+      return { text };
+    } catch (err) {
+      lastErr = err;
+      if (isRateLimitError(err) && attempt < MAX_RETRIES) {
+        const delay = 5000 * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr;
 }

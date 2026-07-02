@@ -236,7 +236,23 @@ export function TextChat({
               )
             );
           } else if (evt.type === "error") {
-            throw new Error(evt.error || "Stream error");
+            // Don't throw — show a friendly message instead of crashing
+            const errorMsg = evt.error || "Something went wrong";
+            if (/429|Too many requests/i.test(errorMsg)) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === streamMsgId
+                    ? {
+                        ...m,
+                        content: "I'm getting rate-limited by the API. Give me a minute and try again — I'll be here.",
+                        mood: "frustrated",
+                      }
+                    : m
+                )
+              );
+            } else {
+              throw new Error(errorMsg);
+            }
           }
         }
       }
