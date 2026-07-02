@@ -10,15 +10,25 @@ interface UseAuthReturn {
 
 /**
  * Tracks authentication state.
- * - On mount, pings /api/auth/check to see if the session cookie is valid.
- * - login() posts to /api/auth/login and returns true on success.
- * - logout() posts to /api/auth/logout.
+ *
+ * In development (preview environment): auth is disabled — the app
+ * loads directly without a login screen. This avoids cookie issues
+ * with the Caddy proxy + cross-origin iframe.
+ *
+ * In production: auth is enabled — pings /api/auth/check to verify
+ * the session cookie, shows login screen if not authenticated.
  */
 export function useAuth(): UseAuthReturn {
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  // In dev mode, always authenticated — skip the login flow entirely
+  const isDev = process.env.NODE_ENV !== "production";
+  const [authenticated, setAuthenticated] = useState<boolean | null>(
+    isDev ? true : null
+  );
 
-  // Check auth status on mount
+  // Check auth status on mount (production only)
   useEffect(() => {
+    if (isDev) return; // skip in dev
+
     let cancelled = false;
     fetch("/api/auth/check", { credentials: "same-origin" })
       .then((r) => {
@@ -31,27 +41,32 @@ export function useAuth(): UseAuthReturn {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isDev]);
 
-  const login = useCallback(async (password: string): Promise<boolean> => {
-    try {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ password }),
-      });
-      if (res.ok) {
-        setAuthenticated(true);
-        return true;
+  const login = useCallback(
+    async (password: string): Promise<boolean> => {
+      if (isDev) return true; // always succeed in dev
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ password }),
+        });
+        if (res.ok) {
+          setAuthenticated(true);
+          return true;
+        }
+        return false;
+      } catch {
+        return false;
       }
-      return false;
-    } catch {
-      return false;
-    }
-  }, []);
+    },
+    [isDev]
+  );
 
   const logout = useCallback(async (): Promise<void> => {
+    if (isDev) return; // no-op in dev
     try {
       await fetch("/api/auth/logout", {
         method: "POST",
@@ -61,7 +76,7 @@ export function useAuth(): UseAuthReturn {
       // ignore
     }
     setAuthenticated(false);
-  }, []);
+  }, [isDev]);
 
   return { authenticated, login, logout };
 }
