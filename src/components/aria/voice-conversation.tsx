@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Mic, Square, Loader2, Volume2, Globe } from "lucide-react";
+import { Mic, Square, Loader2, Volume2, Globe, Radio } from "lucide-react";
 import { useVoiceRecorder } from "@/hooks/voice/use-voice-recorder";
 import {
   useWebSpeechRecognition,
@@ -62,9 +62,17 @@ export function VoiceConversation({
   const [partialUserText, setPartialUserText] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [alwaysListening, setAlwaysListening] = useState(false);
 
   const historyRef = useRef<HTMLDivElement>(null);
   const recognitionLang = settings.recognitionLang;
+  const alwaysListeningRef = useRef(false);
+  const isProcessingRef = useRef(false);
+
+  // Keep ref in sync
+  useEffect(() => {
+    alwaysListeningRef.current = alwaysListening;
+  }, [alwaysListening]);
 
   const handleUserSpeech = useCallback(
     async (text: string) => {
@@ -204,6 +212,25 @@ export function VoiceConversation({
   const webRecognition = useWebSpeechRecognition({
     lang: recognitionLang,
     onFinalResult: (text) => {
+      // In always-listening mode, only respond if the text contains
+      // the wake word "aria" (case-insensitive). Strip the wake word
+      // from the message before sending.
+      if (alwaysListeningRef.current) {
+        const lower = text.toLowerCase();
+        if (lower.includes("aria") || lower.includes("hey aria") || lower.includes("areeya")) {
+          // Strip the wake word and send the rest
+          const cleaned = text.replace(/\b(hey\s+)?aria\b/gi, "").trim();
+          if (cleaned) {
+            void handleUserSpeech(cleaned);
+          } else {
+            // Just the wake word alone — respond with a greeting
+            void handleUserSpeech("Hey");
+          }
+        }
+        // If no wake word, ignore — just background listening
+        return;
+      }
+      // Normal mode — send everything
       void handleUserSpeech(text);
     },
     onError: (err) => {
@@ -212,6 +239,29 @@ export function VoiceConversation({
       }
     },
   });
+
+  // Auto-start/stop recognition when always-listening is toggled
+  useEffect(() => {
+    if (!webSpeechSupported) return;
+    if (alwaysListening && !webRecognition.recording && !thinking && !speech.speaking) {
+      webRecognition.start();
+    }
+    if (!alwaysListening && webRecognition.recording) {
+      webRecognition.stop();
+    }
+  }, [alwaysListening, thinking, speech.speaking]);
+
+  // When ARIA finishes speaking in always-listening mode, resume listening
+  useEffect(() => {
+    if (alwaysListening && !speech.speaking && !thinking && webSpeechSupported) {
+      const timer = setTimeout(() => {
+        if (alwaysListeningRef.current && !webRecognition.recording) {
+          webRecognition.start();
+        }
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [alwaysListening, speech.speaking, thinking]);
 
   // Z.ai ASR fallback (MediaRecorder + server transcription)
   const zaiRecorder = useVoiceRecorder({
@@ -270,12 +320,33 @@ export function VoiceConversation({
         <div>
           <div className="text-sm font-medium tracking-wide">Voice mode</div>
           <div className="text-[10px] text-[#8a7d72]">
-            {useWebSpeech
-              ? "Browser voice recognition · Hindi supported"
-              : "Server voice recognition · English only"}
+            {alwaysListening
+              ? "Say 'Hey ARIA' — I'm always listening"
+              : useWebSpeech
+                ? "Browser voice recognition · Hindi supported"
+                : "Server voice recognition · English only"}
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Always-listening / wake word toggle */}
+          {useWebSpeech && (
+            <button
+              onClick={() => setAlwaysListening((v) => !v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] uppercase tracking-wider transition-colors border ${
+                alwaysListening
+                  ? "bg-[#7fd1c4]/20 border-[#7fd1c4]/50 text-[#7fd1c4] animate-pulse"
+                  : "bg-transparent border-white/5 text-[#8a7d72] hover:text-[#e8e2db] hover:bg-white/5"
+              }`}
+              title={
+                alwaysListening
+                  ? "Always listening — say 'Hey ARIA' to talk. Click to stop."
+                  : "Turn on always-listening mode (say 'Hey ARIA' to talk)"
+              }
+            >
+              <Radio className="w-3 h-3" />
+              <span className="hidden sm:inline">{alwaysListening ? "Live" : "Auto"}</span>
+            </button>
+          )}
           {/* Language toggle */}
           {useWebSpeech && (
             <button

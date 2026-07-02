@@ -15,6 +15,8 @@ import {
   VolumeX,
   Check,
   LogOut,
+  Bell,
+  Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -95,10 +97,15 @@ export default function Home() {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [moodLogs, setMoodLogs] = useState<MoodLog[]>([]);
   const [activePanel, setActivePanel] = useState<
-    "conversations" | "memory" | "moods"
+    "conversations" | "memory" | "moods" | "tools"
   >("conversations");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [memorySearch, setMemorySearch] = useState("");
+
+  // Proactive messages from ARIA
+  const [proactiveMessages, setProactiveMessages] = useState<
+    { id: string; type: string; content: string; mood: string; createdAt: string }[]
+  >([]);
 
   // Mobile mode toggle: "text" | "voice" — on desktop both are visible side-by-side
   const [mobileMode, setMobileMode] = useState<"text" | "voice">("text");
@@ -155,21 +162,58 @@ export default function Home() {
     if (authenticated !== true) return;
     const initialLoad = async () => {
       try {
-        const [convRes, memRes, moodRes] = await Promise.all([
+        const [convRes, memRes, moodRes, proactiveRes] = await Promise.all([
           fetch("/api/conversations").then((r) => r.json()),
           fetch("/api/memory").then((r) => r.json()),
           fetch("/api/moods").then((r) => r.json()),
+          fetch("/api/proactive").then((r) => r.json()),
         ]);
         setConversations(convRes.conversations ?? []);
         setMemories(memRes.memories ?? []);
         setMoodLogs(moodRes.moods ?? []);
         if (moodRes.moods?.[0]?.mood) setCurrentMood(moodRes.moods[0].mood);
+        setProactiveMessages(proactiveRes.messages ?? []);
       } catch (err) {
         console.error(err);
       }
     };
     void initialLoad();
   }, [authenticated]);
+
+  // Proactive message checker — runs every 5 minutes.
+  // Triggers the cron endpoint to generate proactive messages, then
+  // fetches any new unread ones.
+  useEffect(() => {
+    if (authenticated !== true) return;
+    const checkProactive = async () => {
+      try {
+        // Trigger generation (fire and forget)
+        void fetch("/api/cron/proactive", { method: "POST" }).catch(() => {});
+        // Fetch unread messages
+        const res = await fetch("/api/proactive");
+        const data = await res.json();
+        if (data.messages) {
+          setProactiveMessages(data.messages);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    // Check on mount
+    void checkProactive();
+    // Then every 5 minutes
+    const interval = setInterval(checkProactive, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [authenticated]);
+
+  const dismissProactiveMessage = async (id: string) => {
+    try {
+      await fetch(`/api/proactive?id=${id}`, { method: "PATCH" });
+      setProactiveMessages((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const openConversation = async (id: string) => {
     try {
@@ -307,6 +351,18 @@ export default function Home() {
             </button>
           </div>
 
+          {/* Proactive message indicator */}
+          {proactiveMessages.length > 0 && (
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="relative flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] uppercase tracking-wider transition-colors border bg-[#7fd1c4]/10 border-[#7fd1c4]/30 text-[#7fd1c4] hover:bg-[#7fd1c4]/20"
+              title={`${proactiveMessages.length} message${proactiveMessages.length > 1 ? "s" : ""} from ARIA`}
+            >
+              <Bell className="w-3 h-3" />
+              <span className="hidden sm:inline">{proactiveMessages.length}</span>
+            </button>
+          )}
+
           <VoiceSettings speech={speech} />
 
           <Badge
@@ -373,6 +429,13 @@ export default function Home() {
                   onClick={() => setActivePanel("moods")}
                   icon={<Activity className="w-3.5 h-3.5" />}
                   label="Moods"
+                />
+                <TabButton
+                  active={activePanel === "tools"}
+                  onClick={() => setActivePanel("tools")}
+                  icon={<Wrench className="w-3.5 h-3.5" />}
+                  label="Tools"
+                  badge={proactiveMessages.length}
                 />
               </div>
 
@@ -587,6 +650,13 @@ export default function Home() {
                     })}
                   </div>
                 )}
+
+                {activePanel === "tools" && (
+                  <ToolsPanel
+                    proactiveMessages={proactiveMessages}
+                    onDismissProactive={dismissProactiveMessage}
+                  />
+                )}
               </ScrollArea>
 
               <div className="p-3 border-t border-white/5 flex items-center justify-between">
@@ -687,5 +757,152 @@ function TabButton({
         </span>
       )}
     </button>
+  );
+}
+
+// --- Tools Panel ---
+function ToolsPanel({
+  proactiveMessages,
+  onDismissProactive,
+}: {
+  proactiveMessages: {
+    id: string;
+    type: string;
+    content: string;
+    mood: string;
+    createdAt: string;
+  }[];
+  onDismissProactive: (id: string) => void;
+}) {
+  const [reminders, setReminders] = useState<
+    { id: string; title: string; triggerAt: string }[]
+  >([]);
+  const [notes, setNotes] = useState<
+    { id: string; title: string; content: string; tags: string }[]
+  >([]);
+
+  useEffect(() => {
+    void fetch("/api/reminders")
+      .then((r) => r.json())
+      .then((data) => setReminders(data.reminders ?? []))
+      .catch(() => {});
+    void fetch("/api/notes")
+      .then((r) => r.json())
+      .then((data) => setNotes(data.notes ?? []))
+      .catch(() => {});
+  }, []);
+
+  return (
+    <div className="py-2 px-2 space-y-3">
+      {/* Proactive messages */}
+      {proactiveMessages.length > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-[#7fd1c4] px-1 pb-2 font-medium">
+            From ARIA
+          </div>
+          <div className="space-y-1.5">
+            {proactiveMessages.map((msg) => {
+              const mp = getMoodProfile(msg.mood);
+              return (
+                <div
+                  key={msg.id}
+                  className="group px-3 py-2 rounded-md bg-[#7fd1c4]/[0.05] border border-[#7fd1c4]/15"
+                >
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <div
+                      className="w-1.5 h-1.5 rounded-full"
+                      style={{ background: mp.color }}
+                    />
+                    <span
+                      className="text-[9px] uppercase tracking-wider"
+                      style={{ color: mp.color }}
+                    >
+                      {msg.type.replace(/_/g, " ")}
+                    </span>
+                    <button
+                      onClick={() => onDismissProactive(msg.id)}
+                      className="ml-auto opacity-0 group-hover:opacity-100 text-[#6b5f54] hover:text-[#a89c8e]"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                  <p className="text-xs text-[#d4cabd] leading-snug">
+                    {msg.content}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Reminders */}
+      <div>
+        <div className="text-[10px] uppercase tracking-wider text-[#a89c8e] px-1 pb-2">
+          Reminders
+        </div>
+        {reminders.length === 0 ? (
+          <p className="text-[10px] text-[#6b5f54] px-3 py-2">
+            No upcoming reminders. Ask ARIA to set one.
+          </p>
+        ) : (
+          <div className="space-y-1">
+            {reminders.map((r) => (
+              <div
+                key={r.id}
+                className="px-3 py-1.5 rounded-md bg-white/[0.03] border border-white/5"
+              >
+                <div className="text-xs text-[#d4cabd]">{r.title}</div>
+                <div className="text-[9px] text-[#6b5f54] mt-0.5">
+                  {new Date(r.triggerAt).toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Notes */}
+      <div>
+        <div className="text-[10px] uppercase tracking-wider text-[#a89c8e] px-1 pb-2">
+          Notes
+        </div>
+        {notes.length === 0 ? (
+          <p className="text-[10px] text-[#6b5f54] px-3 py-2">
+            No notes yet. Ask ARIA to save something.
+          </p>
+        ) : (
+          <div className="space-y-1">
+            {notes.slice(0, 5).map((n) => (
+              <div
+                key={n.id}
+                className="px-3 py-1.5 rounded-md bg-white/[0.03] border border-white/5"
+              >
+                <div className="text-xs text-[#d4cabd] font-medium">
+                  {n.title}
+                </div>
+                <div className="text-[10px] text-[#6b5f54] mt-0.5 line-clamp-2">
+                  {n.content}
+                </div>
+                {n.tags && (
+                  <div className="text-[9px] text-[#7fd1c4] mt-1">
+                    {n.tags}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Help */}
+      <div className="px-3 py-2 rounded-md bg-white/[0.02] border border-white/5">
+        <p className="text-[10px] text-[#6b5f54] leading-relaxed">
+          Ask ARIA to do things: &ldquo;remind me to call mom at 6pm&rdquo;,
+          &ldquo;what&apos;s the weather in Bangalore?&rdquo;,
+          &ldquo;save a note about this meeting&rdquo;.
+        </p>
+      </div>
+    </div>
   );
 }

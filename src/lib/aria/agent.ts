@@ -1,6 +1,6 @@
 // ARIA — Agent core
 // Handles: memory recall, LLM call, mood parsing, memory extraction,
-// persistence. One function: runTurn().
+// tool execution, persistence. One function: runTurn().
 
 import { db } from "@/lib/db";
 import { ARIA_SYSTEM_PROMPT } from "./persona";
@@ -9,6 +9,7 @@ import {
   createChatCompletion,
   createChatCompletionStream,
 } from "./zai-client";
+import { executeTool, TOOL_DESCRIPTIONS, type ToolName } from "./tools";
 import type { AgentTurnResult, MemoryKind } from "./types";
 
 // --- Mood tag parsing ----------------------------------------------------
@@ -45,6 +46,51 @@ export function parseMemoryTags(content: string): {
   // Strip the memory lines from the visible content
   const cleaned = content.replace(MEMORY_TAG_RE, "").replace(/\n{3,}/g, "\n\n").trim();
   return { cleaned, memories };
+}
+
+// --- Tool tag parsing ------------------------------------------------------
+
+const TOOL_TAG_RE = /§\s*tool\s*:\s*([a-z_]+)\s*\|([^§]*)§/gi;
+
+export function parseToolTags(content: string): {
+  cleaned: string;
+  toolCalls: { name: ToolName; args: string }[];
+} {
+  const toolCalls: { name: ToolName; args: string }[] = [];
+  let m: RegExpExecArray | null;
+  TOOL_TAG_RE.lastIndex = 0;
+  while ((m = TOOL_TAG_RE.exec(content)) !== null) {
+    const name = m[1].toLowerCase() as ToolName;
+    const args = m[2].trim();
+    toolCalls.push({ name, args });
+  }
+  const cleaned = content.replace(TOOL_TAG_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+  return { cleaned, toolCalls };
+}
+
+// Execute all tool calls and return a summary string for the conversation
+async function executeToolCalls(
+  toolCalls: { name: ToolName; args: string }[]
+): Promise<{ summary: string; toolUsed: string | undefined }> {
+  if (toolCalls.length === 0) return { summary: "", toolUsed: undefined };
+
+  const results: string[] = [];
+  let toolUsed: string | undefined;
+
+  for (const call of toolCalls) {
+    const result = await executeTool(call.name, call.args);
+    results.push(`[Tool: ${call.name}] ${result.result}`);
+    if (result.success) {
+      toolUsed = toolUsed
+        ? `${toolUsed},${call.name}`
+        : call.name;
+    }
+  }
+
+  return {
+    summary: results.join("\n"),
+    toolUsed,
+  };
 }
 
 // --- Memory recall -------------------------------------------------------
@@ -140,7 +186,7 @@ async function prepareTurn(
 
   const memoryBlock = await recallRelevantMemories(userMessage);
 
-  const systemContent = [ARIA_SYSTEM_PROMPT, memoryBlock]
+  const systemContent = [ARIA_SYSTEM_PROMPT, TOOL_DESCRIPTIONS, memoryBlock]
     .filter(Boolean)
     .join("\n\n---\n\n");
 
@@ -226,7 +272,21 @@ export async function runTurn({
   });
 
   const { mood, content: moodStripped } = parseMoodTag(rawContent);
-  const { cleaned, memories } = parseMemoryTags(moodStripped);
+  const { cleaned: memCleaned, memories } = parseMemoryTags(moodStripped);
+  const { cleaned, toolCalls } = parseToolTags(memCleaned);
+
+  // Execute any tool calls
+  let toolUsed: string | undefined = webSearched ? "web_search" : undefined;
+  let toolPayload: string | undefined;
+  if (toolCalls.length > 0) {
+    const toolResult = await executeToolCalls(toolCalls);
+    if (toolResult.toolUsed) {
+      toolUsed = toolUsed
+        ? `${toolUsed},${toolResult.toolUsed}`
+        : toolResult.toolUsed;
+    }
+    toolPayload = toolResult.summary.slice(0, 500);
+  }
 
   await finalizeTurn({ conversationId, userMessage, mood, memories });
 
@@ -234,8 +294,8 @@ export async function runTurn({
     content: cleaned,
     rawContent,
     mood,
-    toolUsed: webSearched ? "web_search" : undefined,
-    toolPayload: undefined,
+    toolUsed,
+    toolPayload,
     newMemories: memories,
   };
 }
@@ -325,14 +385,28 @@ export async function runTurnStream(
   // for callers that want the full string (e.g. to persist as a message
   // row) rather than just the incremental deltas.
   const { content: moodStripped } = parseMoodTag(rawContent);
-  const { cleaned } = parseMemoryTags(moodStripped);
+  const { cleaned: memCleaned } = parseMemoryTags(moodStripped);
+  const { cleaned, toolCalls } = parseToolTags(memCleaned);
+
+  // Execute any tool calls
+  let toolUsed: string | undefined = webSearched ? "web_search" : undefined;
+  let toolPayload: string | undefined;
+  if (toolCalls.length > 0) {
+    const toolResult = await executeToolCalls(toolCalls);
+    if (toolResult.toolUsed) {
+      toolUsed = toolUsed
+        ? `${toolUsed},${toolResult.toolUsed}`
+        : toolResult.toolUsed;
+    }
+    toolPayload = toolResult.summary.slice(0, 500);
+  }
 
   return {
     content: cleaned,
     rawContent,
     mood,
-    toolUsed: webSearched ? "web_search" : undefined,
-    toolPayload: undefined,
+    toolUsed,
+    toolPayload,
     newMemories: memories,
   };
 }

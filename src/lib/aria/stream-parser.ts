@@ -50,6 +50,13 @@ export function createAriaStreamParser(): AriaStreamParser {
     });
   }
 
+  // Also strip complete tool tags — they're executed server-side after
+  // the stream completes, so they should never appear in the visible text.
+  const TOOL_TAG_RE = /§\s*tool\s*:\s*[a-z_]+\s*\|[^§]*§/gi;
+  function extractToolTags() {
+    buffer = buffer.replace(TOOL_TAG_RE, "");
+  }
+
   function process(flushing: boolean): string {
     // 1. Mood tag sits at the very start. Hold everything until we either
     //    confirm it or confirm the buffer definitely isn't a mood tag.
@@ -71,8 +78,9 @@ export function createAriaStreamParser(): AriaStreamParser {
       }
     }
 
-    // 2. Pull out any *complete* memory tags wherever they appear.
+    // 2. Pull out any *complete* memory and tool tags wherever they appear.
     extractMemories();
+    extractToolTags();
 
     // 3. Don't emit a trailing partial tag (e.g. buffer ends in "...§mem").
     if (flushing) {
