@@ -12,7 +12,7 @@ import ZAI from "z-ai-web-dev-sdk";
 
 const ZAI_MODEL = "glm-4.6";
 const GEMINI_MODEL = "gemini-2.0-flash";
-const OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
+const OPENROUTER_MODEL = "google/gemma-4-31b-it:free";
 const MAX_RETRIES = 4;
 
 function sleep(ms: number): Promise<void> {
