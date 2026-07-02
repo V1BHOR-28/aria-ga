@@ -1,8 +1,6 @@
-// ARIA — Authentication middleware
+// ARIA — Authentication proxy (Next.js 16 convention, replaces middleware.ts)
 //
 // Gates all /api/* routes except /api/auth/login and /api/auth/logout.
-// /api/auth/check IS gated — unauthenticated requests get 401, which is
-// exactly what the useAuth hook needs to detect "not logged in".
 // Rejects unauthenticated requests with 401 BEFORE any route handler
 // or DB/LLM call runs.
 
@@ -14,7 +12,7 @@ export const config = {
   matcher: ["/api/((?!auth/login|auth/logout).*)"],
 };
 
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const cookieHeader = req.headers.get("cookie");
 
   if (!(await isAuthenticated(cookieHeader))) {

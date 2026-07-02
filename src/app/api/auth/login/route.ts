@@ -41,13 +41,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Set HTTP-only, Secure, SameSite=Strict cookie
+    // Set HTTP-only cookie. Use SameSite=lax (not strict) because the
+    // preview may be embedded in an iframe — strict blocks cookies in
+    // cross-site iframe contexts.
     const cookieValue = await createSessionCookie();
     const res = NextResponse.json({ ok: true });
     res.cookies.set(SESSION_COOKIE_NAME, cookieValue, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      sameSite: "lax",
       path: "/",
       maxAge: 7 * 24 * 60 * 60, // 7 days (seconds)
     });
