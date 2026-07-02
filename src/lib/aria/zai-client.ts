@@ -1,18 +1,18 @@
 // ARIA — Chat provider abstraction
 //
-// Supports multiple LLM providers for chat completions. The active provider
-// is determined by environment variables:
+// Supports multiple LLM providers for chat completions. Priority:
+//   1. OPENROUTER_API_KEY → OpenRouter (free Llama 3.3 70B, great quality)
+//   2. GEMINI_API_KEY     → Google Gemini (free, great Hindi — region restricted)
+//   3. ZAI_API_KEY        → Z.ai (fallback, also used for TTS/ASR)
 //
-//   GEMINI_API_KEY  → uses Google Gemini (free, generous limits, great Hindi)
-//   ZAI_API_KEY     → uses Z.ai (fallback, has TTS/ASR too)
-//
-// If both are set, Gemini is preferred for chat (better free tier).
+// Get a free OpenRouter key from: https://openrouter.ai/keys
 // TTS and ASR always go through the Z.ai SDK (or Web Speech API on client).
 
 import ZAI from "z-ai-web-dev-sdk";
 
-const DEFAULT_MODEL = "glm-4.6";
+const ZAI_MODEL = "glm-4.6";
 const GEMINI_MODEL = "gemini-2.0-flash";
+const OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
 const MAX_RETRIES = 4;
 
 function sleep(ms: number): Promise<void> {
@@ -42,11 +42,116 @@ export interface ChatCompletionOptions {
 
 // --- Provider detection ----------------------------------------------------
 
-function getProvider(): "gemini" | "zai" {
+function getProvider(): "openrouter" | "gemini" | "zai" {
+  if (process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY !== "your-openrouter-api-key-here") {
+    return "openrouter";
+  }
   if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "your-gemini-api-key-here") {
     return "gemini";
   }
   return "zai";
+}
+
+// --- OpenRouter (free Llama 3.3 70B, OpenAI-compatible) -------------------
+//
+// Get your free key from: https://openrouter.ai/keys
+// Free models: Llama 3.3 70B, Qwen, Gemma — all high quality
+// Supports streaming, Hindi, and follows instructions well
+
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+async function openrouterChatCompletion(
+  options: ChatCompletionOptions
+): Promise<{ content: string; webSearched: boolean }> {
+  const apiKey = process.env.OPENROUTER_API_KEY!;
+  let lastErr: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          "HTTP-Referer": "https://aria.local",
+          "X-Title": "ARIA",
+        },
+        body: JSON.stringify({
+          model: OPENROUTER_MODEL,
+          messages: options.messages,
+          temperature: options.temperature ?? 0.85,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(`OpenRouter error (${res.status}): ${errText.slice(0, 300)}`);
+      }
+
+      const data = await res.json();
+      const content: string = data?.choices?.[0]?.message?.content ?? "";
+      return { content, webSearched: false };
+    } catch (err) {
+      lastErr = err;
+      if (isRateLimitError(err) && attempt < MAX_RETRIES) {
+        const delay = 5000 * Math.pow(2, attempt);
+        console.log(`[openrouter] 429, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
+async function openrouterChatCompletionStream(
+  options: ChatCompletionOptions
+): Promise<{ stream: ReadableStream<Uint8Array>; webSearched: boolean }> {
+  const apiKey = process.env.OPENROUTER_API_KEY!;
+  let lastErr: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          "HTTP-Referer": "https://aria.local",
+          "X-Title": "ARIA",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          model: OPENROUTER_MODEL,
+          messages: options.messages,
+          temperature: options.temperature ?? 0.85,
+          stream: true,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(`OpenRouter stream error (${res.status}): ${errText.slice(0, 300)}`);
+      }
+
+      if (!res.body) {
+        throw new Error("OpenRouter returned no stream body");
+      }
+
+      return { stream: res.body as ReadableStream<Uint8Array>, webSearched: false };
+    } catch (err) {
+      lastErr = err;
+      if (isRateLimitError(err) && attempt < MAX_RETRIES) {
+        const delay = 5000 * Math.pow(2, attempt);
+        console.log(`[openrouter] 429 (stream), retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 // --- Gemini (Google AI — free, OpenAI-compatible endpoint) -----------------
@@ -162,7 +267,7 @@ async function zaiChatCompletion(
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const completion = await zai.chat.completions.create({
-        model: DEFAULT_MODEL,
+        model: ZAI_MODEL,
         messages: options.messages,
         temperature: options.temperature ?? 0.85,
         thinking: { type: "disabled" },
@@ -192,7 +297,7 @@ async function zaiChatCompletionStream(
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const response = await zai.chat.completions.create({
-        model: DEFAULT_MODEL,
+        model: ZAI_MODEL,
         messages: options.messages,
         temperature: options.temperature ?? 0.85,
         thinking: { type: "disabled" },
@@ -245,6 +350,9 @@ export async function createChatCompletion(
 ): Promise<{ content: string; webSearched: boolean }> {
   const provider = getProvider();
   console.log(`[chat] Using provider: ${provider}`);
+  if (provider === "openrouter") {
+    return openrouterChatCompletion(options);
+  }
   if (provider === "gemini") {
     return geminiChatCompletion(options);
   }
@@ -256,6 +364,9 @@ export async function createChatCompletionStream(
 ): Promise<{ stream: ReadableStream<Uint8Array>; webSearched: boolean }> {
   const provider = getProvider();
   console.log(`[chat-stream] Using provider: ${provider}`);
+  if (provider === "openrouter") {
+    return openrouterChatCompletionStream(options);
+  }
   if (provider === "gemini") {
     return geminiChatCompletionStream(options);
   }
