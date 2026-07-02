@@ -505,7 +505,7 @@ export function useSpeech(): UseSpeechReturn {
 }
 
 const DEFAULT_SETTINGS: VoiceSettings = {
-  provider: "zai", // Friday preset — the user's preferred voice
+  provider: "web-speech", // Browser TTS — free, no rate limits
   voiceId: "",
   speed: 1.0,
   recognitionLang: "en-IN",

@@ -70,8 +70,8 @@ export interface VoiceSettings {
 const STORAGE_KEY = "aria-voice-settings";
 
 export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
-  provider: "zai", // Friday preset — the user's preferred voice
-  voiceId: "", // empty = Friday preset's default
+  provider: "web-speech", // Browser TTS — free, no rate limits
+  voiceId: "", // empty = pick best female English voice automatically
   speed: 1.0,
   recognitionLang: "en-IN", // auto-detect English/Hindi (Indian context)
 };
